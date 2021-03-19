@@ -1,0 +1,572 @@
+#!/bin/bash
+# vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 noet:
+
+PROG="nicy"
+
+for f in "/etc/${PROG}/environment" \
+	"${XDG_CONFIG_HOME:-$HOME/.config}/${PROG}/environment"; do
+	[ -f "$f" ] && . "$f"
+done
+
+# User configuration files first in order to use them, and not the global
+# ones when parsing rules.
+[ ${#NICY_SEARCH_DIRS[@]} -eq 0 ] &&
+	NICY_SEARCH_DIRS=( "$HOME/.config/${PROG}" "/etc/${PROG}" "/usr/local/etc/{$PROG}" )
+
+# Show what command is launched
+NICY_VERBOSE=${NICY_VERBOSE:-"n"}
+
+QUIET=n
+[ "$NICY_VERBOSE" = "y" ] && VERBOSE=1 || VEERBOSE=0
+USE_TYPE=auto
+USE_CGROUP=null
+ALWAYS_USE_SCOPE=n
+DRY_RUN=n
+FLAG_SHOW=n
+
+# Optional hard-coded color management #{{{
+COLORS="n"
+COLORG=
+COLORR=
+UNDERLINE=
+RESET=
+if [ -t 1 ] && [ "$COLORS" = "y" ]; then
+	COLORR=$(tput setaf 1)
+	COLORG=$(tput setaf 2)
+	UNDERLINE=$(tput smul)
+	RESET=$(tput sgr0)
+fi #}}}
+
+declare -ga search_dirs=("${NICY_SEARCH_DIRS[@]}")
+
+CACHEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
+mkdir -p "$CACHEDIR"
+
+usage() { #{{{
+	width=$(echo "cols=$(tput cols); if (cols < 79) cols else 79" | bc -l)
+	printf "Usage: $PROG [-s|-n|(-q|-v)] [-m] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}] [--] COMMAND [ARGS]...\n"
+	printf "       $PROG --reset\n"
+	printf "       $PROG -k (rules|types|cgroups)[:DIR]\n"
+	printf "\nOptions:\n"
+	column -c "$width" -t -N switches,text -W text -d -s "#" <<EOF
+ -s, --get-script#
+ -n, --dry-run#Display but do not run any command.
+ -q, --quiet#Be quiet and suppress additional informational output.
+ -v, --verbose#Be verbose and display which command is launched.
+ -m, --managed#Always run the command inside his own scope.
+ -t, --type=TYPE#Control the set of properties applied. Accepts 'auto' that searches for the command rule set (default), 'cgroup-only' that removes any property except the cgroup, 'default' or any other configured type.
+ -d, --default#Similar to '--type=default'. Do not search for a specific rule. Apply the fallback values from the 'default' type.
+ -z, --cgroup-only#Similar to '--type=cgroup-only'. Unset all the defined properties, if any.
+ -c, --cgroup=CGROUP#Run the command as part of this cgroup. The slice file that defines the cgroup must exist before running the command, since $PROG does not create it.
+     --cpu{QUOTA}#Similar to '--cgroup=cpu{QUOTA}', where QUOTA is a percentage relative to the total CPU time available on all CPU cores.
+     --reset#Rebuild the volatile cache and exit.
+ -k, --keys=KIND[:DIR]#Dump the known values for the required KIND of keys.  Only from DIR folder, if present.
+ -h, --help#Display this help and exit.
+EOF
+} #}}}
+
+error_exit() { #{{{
+	echo -e "${COLORR}$PROG: error: ${2:-'unknown error'}${RESET}" 1>&2
+	exit "${1:-1}"
+} #}}}
+
+# Functions
+has_cgroup() { systemctl cat "${1}.slice" >/dev/null 2>&1 ; }
+has_quota() { [ $# -eq 0 ] && return 1 || has_cgroup "cpu${1}" ; }
+
+find_any()  { #{{{
+	[ $# -lt 3 ] && return
+	kind=$1
+	key=$2
+	what=$3
+	pattern='"'"$key"'":[ ]*"'"$what"'"'
+	for confdir in "${search_dirs[@]}"; do
+		[ -d "$confdir" ] &&
+			grep -rh "$pattern" --include='*.'"$kind"'s' "$confdir"
+	done | grep -E -v '^[ ]*#' | head -n1
+} #}}}
+
+default() { find_any "type" "type" "default" ; }
+
+dump_content() {
+	[ $# -lt 2 ] && return
+	kind=${1%s}
+	shift
+	for confdir; do
+		[ -d "$confdir" ] &&
+			grep -rhE -v "^[ ]*#|^$" "--include=*.${kind}s" "$confdir"
+	done
+}
+
+find_all()  { #{{{
+	[ $# -ne 1 ] && return
+	kind=$1
+	dump_content "$kind" "${search_dirs[@]}"
+} #}}}
+
+unique_by() {
+	[ $# -eq 0 ] && return
+	key=$1
+	jq -sMcr "unique_by(.$key) | .[] | .$key" -
+}
+
+dump_keys()  { #{{{
+	[ $# -eq 0 ] && return 1
+	kind=${1%s}
+	case "$kind" in
+		rule) key="name" ;;
+		type | cgroup) key=$kind ;;
+		*) return 1 ;;
+	esac
+	shift
+	[ $# -eq 0 ] &&
+		set -- "${search_dirs[@]}"
+	dump_content "$kind" "$@" | unique_by "$key"
+} #}}}
+
+prepare_json()  { #{{{
+	[ -z "$1" ] &&
+		return
+	[[ "$1" =~ (rule|type|cgroup) ]] ||
+		return
+	dest="$CACHEDIR/${1}s"
+	[ "$1" != "rule" ] &&
+		key=$1 ||
+		key="name"
+	[ ! -f "$dest" ] &&
+		find_all "$1" | \
+		jq -sMcr  '[.[]|map_values(tostring)]|unique_by(.'"$key"')|.[]' >"$dest"
+} #}}}
+
+set_filter()  { #{{{
+	for item in "rule" "type" "cgroup"; do
+		prepare_json "$item"
+	done
+	type_def="def type_def(\$t): \$types|first(.[]|select(.type == \$t))?;"
+	cgroup_def="def cgroup_def(\$c): \$cgroups|first(.[]|select(.cgroup == \$c))? // {} ;"
+	update_type='if has("type") then type_def(.type) + . else . end'
+	update_cgroup='if has("cgroup") then cgroup_def(.cgroup) + . else . end'
+	remove_keys='del(.name, .type, .cgroup)'
+	to_entries='to_entries|.[]|"\(.key)=\(.value)"'
+	force_cgroup='if ($cgroup != "null") then . + cgroup_def($cgroup) else . end'
+	default='type_def("default") // {}'
+	case "$1" in
+		auto) filter="\$rules|first(.[]|select(.name == \$name))? // ($default)" ;;
+		default) filter="$default" ;;
+		cgroup-only) filter="{}" ;;
+		*) filter='type_def($type) // {}';;
+	esac
+	cat <<-EOF
+	$type_def
+	$cgroup_def
+	$filter|
+	$update_type|$update_cgroup|$force_cgroup|
+	$remove_keys|$to_entries
+	EOF
+} #}}}
+
+get_entries()  { #{{{
+	set_filter "$USE_TYPE" >"$CACHEDIR/filter"
+	jq --null-input -Mcr \
+		--arg name "$1" \
+		--arg cgroup "$USE_CGROUP" \
+		--arg type "$USE_TYPE" \
+		--slurpfile rules "$CACHEDIR/rules" \
+		--slurpfile types "$CACHEDIR/types" \
+		--slurpfile cgroups "$CACHEDIR/cgroups" \
+		--from-file "$CACHEDIR/filter"
+} #}}}
+
+set_properties () { # {{{
+	[ $# -ne 1 ] && return
+	get_entries "$1" | while read -r option; do
+		value=${option##*=}
+		case "$option" in
+			CPUQuota=*) # discrete values
+				has_quota "$value" &&
+					echo "my_cpuquota=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			sched=*) # other, batch, idle, fifo or rr (man 2 sched_setscheduler)
+				[[ "$value" =~ ^(other|fifo|rr|batch|idle)$ ]] &&
+					echo "my_sched=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			rtprio=*) # range 1..99 (man 2 sched_setscheduler)
+				[[ $value -ge 1 ]] && [[ $value -le 99 ]] &&
+					echo "my_rtprio=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			nice=*) # range -20..19 (man 2 setpriority)
+				[[ $value -ge -20 ]] && [[ $value -le 19 ]] &&
+					echo "my_niceness=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			ioclass=*) # none, realtime, best-effort or idle (man 2 ioprio_set)
+				[[ "$value" =~ ^(none|realtime|best-effort|idle)$ ]] &&
+					echo "my_ioclass=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			ionice=*) # range 0..7 (man 2 ioprio_set)
+				[[ $value -ge 0 ]] && [[ $value -le 7 ]] &&
+					echo "my_ionice=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			oom_score_adj=*) # range -1000..1000
+				[[ $value -ge -1000 ]] && [[ $value -le 1000 ]] &&
+					echo "my_oomscoreadjust=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			# More options added here
+			ioweight=*) # range 1..10000
+				[[ $value -ge -1 ]] && [[ $value -le 10000 ]] &&
+					echo "my_ioweight=$value" ||
+					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+			# TODO: Check values for memory properties
+			memhigh=*) # bytes (K, M, G and T suffix), percent or infinity
+				echo "my_memhigh=$value" ;;
+			memmax=*) # bytes (K, M, G and T suffix), percent or infinity
+				echo "my_memmax=$value" ;;
+		esac
+	done
+} #}}}
+
+# Parse options
+OPTIND=1
+while getopts ":-:hqvt:c:k:dz" option; do #{{{
+	case $option in
+		-)
+			case "$OPTARG" in
+				help)
+					usage
+					exit 0
+					;;
+				reset)
+					(cd $CACHEDIR && rm -f rules types cgroups)
+					exit 0
+					;;
+				dry-run) DRY_RUN=y ;;
+				quiet) QUIET=y ;;
+				verbose) VERBOSE=$(( $VERBOSE + 1 )) ;;
+				type=*)
+					# Accepts auto, default, cgroup-only or any known type
+					case "${OPTARG##*=}" in
+						auto|default|cgroup-only) USE_TYPE="${OPTARG##*=}" ;;
+						# TODO: Check that type is valid
+						*) USE_TYPE="${OPTARG##*=}" ;;
+					esac
+					;;
+				cgroup=*)
+					value=${OPTARG##*=}
+					has_cgroup "$value" &&
+						USE_CGROUP="$value" ||
+						error_exit 1 "not valid cgroup value '$value'."
+					;;
+				default) USE_TYPE="default" ;;
+				cgroup-only) USE_TYPE="cgroup-only" ;;
+				managed) ALWAYS_USE_SCOPE=y ;;
+				cpu*)
+					has_cgroup "$OPTARG" &&
+						USE_CGROUP="$OPTARG" ||
+						error_exit 1 "unknown option '--$OPTARG'."
+					;;
+				get-script) FLAG_SHOW=y ;;
+				keys=*)
+					splitpart=${OPTARG##*=}
+					kind=${splitpart%%:*}
+					dir=${splitpart#*:}
+					[ "$dir" = "$kind" ] && unset dir
+					kind=${kind,,}
+					kind=${kind%s}
+					case "$kind" in
+						rule|type|cgroup)
+							[ -z "$dir" ] && dump_keys "$kind"
+							[ -n "$dir" ] && [ -d "$dir" ] &&
+								dump_keys "$kind" "$dir"
+							exit 0
+							;;
+						*) error_exit 1 "can't dump anything with '${OPTARG##*=}'." ;;
+					esac
+					;;
+				-) break ;;
+				*) error_exit 1 "unknown option '$OPTARG'." ;;
+			esac
+		;;
+		h)
+			usage
+			exit 0
+			;;
+		s) FLAG_SHOW=y ;;
+		n) DRY_RUN=y ;;
+		q) QUIET=y ;;
+		v) VERBOSE=$(( $VERBOSE + 1 )) ;;
+		m) ALWAYS_USE_SCOPE=y ;;
+		t)
+			# Accepts auto, default, cgroup-only or any known type
+			case "$OPTARG" in
+				auto|default|cgroup-only) USE_TYPE="$OPTARG" ;;
+				# TODO: Check that type is valid
+				*) USE_TYPE="$OPTARG" ;;
+			esac
+			;;
+		c)
+			has_cgroup "$OPTARG" &&
+				USE_CGROUP="$OPTARG" ||
+				error_exit 1 "not valid cgroup value '$OPTARG'."
+			;;
+		d) USE_TYPE="default" ;;
+		z) USE_TYPE="cgroup-only" ;;
+		k)
+			kind=${OPTARG%%:*}
+			dir=${OPTARG#*:}
+			[ "$dir" = "$kind" ] && unset dir
+			kind=${kind,,}
+			kind=${kind%s}
+			case "$kind" in
+				rule|type|cgroup)
+					[ -z "$dir" ] && dump_keys "$kind"
+					[ -n "$dir" ] && [ -d "$dir" ] &&
+						dump_keys "$kind" "$dir"
+					exit 0
+					;;
+				*) error_exit 1 "can't dump anything with '${OPTARG##*=}'." ;;
+			esac
+			;;
+		\?) error_exit 1 "unknown option '$OPTARG'." ;;
+		:) error_exit 1 "missing argument for option '$OPTARG'." ;;
+	esac
+done #}}}
+shift $(($OPTIND - 1))
+
+[ $# -lt 1 ] &&
+	usage &&
+	exit 1
+
+unset my_quiet
+([ "$QUIET" = "y" ] || [ $VERBOSE -lt 2 ]) &&
+my_quiet="--quiet"
+[ "$QUIET" = "y" ] &&
+	VERBOSE=0
+
+name=$(basename "$1")
+
+# Prevent nasty loops if using nested nicy commands
+pattern="${HOME}/.*nicy.*"
+realpath=$(which "$1")
+[ -z "$realpath" ] &&
+	error_exit 1 "$1 not found"
+realpath=$(readlink -f "$realpath")
+if [ "$1" = "$name" ] || [[ "$realpath" =~ $pattern ]]; then
+	# Strip suffix if any
+	name=${name%.nicy}
+	for realpath in $(which -a "$name"); do
+		# Skip path that contains "nicy"
+		[[ "$realpath" =~ $pattern ]] && continue
+		cmdpath=$realpath
+		break
+	done
+else
+	cmdpath="$1"
+fi
+[ -z "$cmdpath" ] &&
+	error_exit 1 "$1 not found" ||
+	shift
+
+# Properties
+declare -g my_cpuquota my_sched my_rtprio my_niceness \
+	my_ioclass my_ionice my_ioweight \
+	my_oomscoreadjust my_memhigh my_memmax
+
+# Populate them
+eval $(set_properties "$name")
+
+# Evaluate if running the command in a scope is required
+SCOPE_REQUIRED=n
+if [ -v my_cpuquota ] || [ -v my_ioweight ] ||
+	[ -v my_memhigh ] || [ -v my_memmax ] ||
+	[ "$ALWAYS_USE_SCOPE" = "y" ]; then
+	SCOPE_REQUIRED=y
+fi
+
+# Command passed to `exec`, if no scope is required, or to `systemd-run`
+declare -ga final_cmd=("$cmdpath")
+
+apply_renice () { #{{{
+	if [ -v my_niceness ]; then
+		# range -20..19 (man 2 setpriority)
+		echo "ulimit -S -e $((20 - $my_niceness))"
+		[ "$SCOPE_REQUIRED" = "n" ] &&
+			echo "renice -n $my_niceness \$$ >/dev/null 2>&1"
+	fi
+} #}}}
+
+apply_oomscore () { #{{{
+	if [ -v my_oomscoreadjust ]; then
+		# range -1000..1000
+		cmd=("choom" "-n" "$my_oomscoreadjust")
+		if [ "$SCOPE_REQUIRED" = "n" ]; then
+			echo "${cmd[@]}" "-p \$$ >/dev/null 2>&1"
+		else
+			final_cmd=("${cmd[@]}" "--" "${final_cmd[@]}")
+		fi
+	fi
+} #}}}
+
+apply_schedtool () { #{{{
+	# man 8 schedtool {{{
+	# -N or -0
+	#   set all PIDs to SCHED_NORMAL/OTHER
+	# -F or -1
+	#   to SCHED_FIFO   root-credentials required
+	# -R or -2
+	#   to SCHED_RR     root-credentials required
+	# -B or -3
+	#   to SCHED_BATCH
+	# -I or -4
+	#   to SCHED_ISO
+	# -D or -5
+	#   to SCHED_IDLEPRIO
+	# -p prio
+	#   specify  static  priority  required for SCHED_FIFO and SCHED_RR.
+	#   Usually ranged from 1-99.
+	# -n nice_level
+	#   set the PID's nice level; see nice(2), nice(1).
+	# -e command [arg ...]
+	#   execute  command  with  given  scheduling parameters (overwrites
+	#   schedtool's process image). See EXAMPLES.
+	# -r     display min and max priority for each policy.
+	# }}}
+	sched_args=()
+	if [ -v my_sched ]; then #{{{
+		# other, batch, idle, fifo or rr (man 2 sched_setscheduler)
+		case "$my_sched" in
+			other) sched_args+=("-N") ;;
+			fifo) sched_args+=("-F") ;;
+			rr) sched_args+=("-R") ;;
+			batch) sched_args+=("-B") ;;
+			idle) sched_args+=("-D") ;;
+		esac
+	fi
+	if [ -v my_rtprio ]; then
+		if [ "$my_sched" = "fifo" ] || [ "$my_sched" = "rr" ] ||
+		(schedtool $$ | grep -q -E -e "POLICY (F|R)") ; then
+			sched_args+=("-p" "$my_prio")
+		fi
+	fi #}}}
+	if [[ ${#sched_args[@]} -gt 0 ]]; then
+		cmd=("schedtool" "${sched_args[@]}")
+		if [ "$SCOPE_REQUIRED" = "n" ]; then
+			echo "${cmd[@]}" "\$$ >/dev/null 2>&1"
+		else
+			final_cmd=("${cmd[@]}" "-e" "${final_cmd[@]}")
+		fi
+	fi
+} #}}}
+
+apply_ionice () { #{{{
+	# man 1 ionice {{{
+	# -c, --class class
+	#        Specify the name or number of the scheduling class to use; 0 for
+	#        none, 1 for realtime, 2 for best-effort, 3 for idle.
+	#
+	# -n, --classdata level
+	#        Specify the scheduling class data.  This only has an  effect  if
+	#        the  class  accepts  an argument.  For realtime and best-effort,
+	#        0-7 are valid data (priority levels), and 0 represents the high‐
+	#        est priority level.
+	#
+	# -p, --pid PID...
+	#        Specify the process IDs of running processes for which to get or
+	#        set the scheduling parameters.
+	#
+	# -P, --pgid PGID...
+	#        Specify the process group IDs of running processes for which  to
+	#        get or set the scheduling parameters.
+	#
+	# -t, --ignore
+	#        Ignore  failure  to  set the requested priority.  If command was
+	#        specified, run it even in case it was not possible  to  set  the
+	#        desired  scheduling  priority,  which can happen due to insuffi‐
+	#        cient privileges or an old kernel version.
+	# }}}
+	ionice_args=()
+	if [ -v my_ioclass ]; then #{{{
+		case "$my_ioclass" in
+			none) ionice_args+=("-c" "0") ;;
+			realtime) ionice_args+=("-c" "1") ;;
+			best-effort) ionice_args+=("-c" "2") ;;
+			idle) ionice_args+=("-c" "3") ;;
+		esac
+		# [ $my_ioclass -ge 0 ] && [ $my_ioclass -le 3 ] &&
+		#   ionice_args+=("-c" "$my_ioclass")
+	fi
+	if [ -v my_ionice ]; then
+		if [ "$my_ioclass" = "realtime" ] || [ "$my_ioclass" = "best-effort" ] ||
+		[[ "$(LANG=C ionice -p $$)" =~ ^(realtime|best-effort): ]]; then
+			ionice_args+=("-n" "$my_ionice")
+		fi
+	fi #}}}
+	if [[ ${#ionice_args[@]} -gt 0 ]]; then
+		cmd=("ionice" "-t" "${ionice_args[@]}")
+		if [ "$SCOPE_REQUIRED" = "n" ]; then
+			echo "${cmd[@]}" "-p \$$ >/dev/null 2>&1"
+		else
+			final_cmd=("${cmd[@]}" "${final_cmd[@]}")
+		fi
+	fi
+} #}}}
+
+exec_cmd () { #{{{
+	if [ "$SCOPE_REQUIRED" = "y" ]; then
+		cmd=("exec" "systemd-run" "-G" "-d" "$my_quiet")
+		[ $UID -ne 0 ] &&
+			cmd+=("--uid=\$UID")
+		cmd+=("--scope" "--unit=$(basename "$name")-\$$")
+		[ -v my_cpuquota ] &&
+			cmd+=("--slice=cpu${my_cpuquota}.slice")
+		[ -v my_ioweight ] &&
+			cmd+=("-p" "IOWeight=$my_ioweight")
+		[ -v my_memhigh ] &&
+			cmd+=("-p" "MemoryHigh=$my_memhigh")
+		[ -v my_memmax ] &&
+			cmd+=("-p" "MemoryMax=$my_memmax")
+		[ -v my_niceness ] &&
+			cmd+=("--nice=$my_niceness")
+	else
+		cmd=("exec")
+	fi
+	echo "${cmd[@]}" "${final_cmd[@]}"
+} #}}}
+
+[ -f "$CACHEDIR/commands" ] && rm -f "$CACHEDIR/commands"
+
+exec 3<> "$CACHEDIR/commands"
+apply_renice >&3
+apply_oomscore >&3
+apply_schedtool >&3
+apply_ionice >&3
+exec_cmd >&3
+exec 3>&-
+mapfile -t commands <"$CACHEDIR/commands"
+
+escaped () { #{{{
+	[ $# -eq 0 ] && return
+	printf '%q ' "$@"
+} #}}}
+
+if [ "$FLAG_SHOW" = "y" ]; then
+	echo "#!/bin/bash"
+	for cmdline in "${commands[@]}"; do
+		[[ "$cmdline" =~ ^exec ]] &&
+			echo "$cmdline" '"$@"' ||
+			echo "$cmdline"
+	done
+	exit 0
+fi
+
+for cmdline in "${commands[@]}"; do
+	[ -z "$cmdline" ] &&
+		continue
+	splitcmd=($(eval echo $cmdline))
+	[[ "$cmdline" =~ ^exec ]] &&
+		splitcmd+=("$@")
+	([ $VERBOSE -ge 1 ] || [ "$DRY_RUN" = "y" ]) &&
+		echo -e "${COLORG}${PROG}: $(escaped "${splitcmd[@]}")${RESET}" >&2
+	[ "$DRY_RUN" = "y" ] &&
+		continue
+	"${splitcmd[@]}"
+done
+

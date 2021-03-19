@@ -1,0 +1,70 @@
+#!/bin/bash
+# vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 noet:
+
+PROG="$(basename "$0")"
+
+# Goodbye root !
+[ $(id -u) -eq 0 ] && exit 1
+
+# The environment variables must be set
+if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/nicy/environment" ]; then
+  . "${XDG_CONFIG_HOME:-$HOME/.config}/nicy/environment"
+else
+  exit 1
+fi
+[ -z "$NICY_SEARCH_DIRS" ] && exit 1
+
+# Must be first first in PATH {{{
+NICY_BIN_DIR="$HOME/bin/nicy"
+[ -d "$NICY_BIN_DIR" ] ||
+  mkdir -p "$NICY_BIN_DIR"
+export PATH="$NICY_BIN_DIR:$PATH"
+#}}}
+
+# Delete nicy scripts but preserve all links {{{
+find "${NICY_BIN_DIR}/" -type f -iname "*.nicy" -delete
+#}}}
+
+dump_rules () { #{{{
+	# ignore file tracks the rules to skip, not adding a nicy script for the
+	# commands listed
+  rc_ignore="${XDG_CONFIG_HOME:-$HOME/.config}/nicy/ignore"
+  if [ -f "$rc_ignore" ]; then
+		nicy -k "rules" | sort | comm -13 "$rc_ignore" -
+	else
+    nicy -k "rules" | sort
+	fi
+}
+#}}}
+
+# Delete the json cache files
+nicy --reset
+# Create nicy script for all the rules matching an available command {{{
+dump_rules | while read -r name; do
+  name_path=$(command -v "$name")
+	[ -z  "$name_path" ] && continue
+	cur_path="${NICY_BIN_DIR}/${name}.nicy"
+	nicy -s -q $name_path >"$cur_path"
+	chmod +x "$cur_path"
+	sleep 0.2
+done
+#}}}
+
+# Create links for all the rules provided by the user (found in home) {{{
+declare -ga search_dirs
+mapfile -d ":" -t search_dirs <<<"$NICY_SEARCH_DIRS"
+pattern="^$HOME"'/.*'
+for confdir in "${search_dirs[@]}"; do
+	[[ "$confdir" =~ $pattern ]] && continue
+	(
+		cd "${NICY_BIN_DIR}"
+		nicy -k "rules:$confdir" |
+			while read -r name; do
+				[ ! -f "${name}.nicy" ] && continue
+				ln -sf -T "${name}.nicy" "${name}"
+			done
+	)
+done
+#}}}
+
+exit 0

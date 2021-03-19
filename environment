@@ -1,0 +1,5 @@
+# User configuration files, if any, then global ones
+NICY_SEARCH_DIRS=( "$HOME/.config/nicy" "/usr/local/etc/nicy" )
+
+# Show what command is launched and some more information from systemd-run
+NICY_VERBOSE="y"
