@@ -37,8 +37,8 @@ dump_rules () { #{{{
 }
 #}}}
 
-# Delete the json cache files
-nicy --reset
+# Rebuild the json cache files
+nicy --rebuild
 # Create nicy script for all the rules matching an available command {{{
 dump_rules | while read -r name; do
   name_path=$(command -v "$name")
@@ -55,10 +55,10 @@ declare -ga search_dirs
 mapfile -d ":" -t search_dirs <<<"$NICY_SEARCH_DIRS"
 pattern="^$HOME"'/.*'
 for confdir in "${search_dirs[@]}"; do
-	[[ "$confdir" =~ $pattern ]] && continue
+	[[ "$confdir" =~ $pattern ]] || continue
 	(
 		cd "${NICY_BIN_DIR}"
-		nicy -k "rules:$confdir" |
+		nicy -k "rules" "--from-dir=$confdir" |
 			while read -r name; do
 				[ ! -f "${name}.nicy" ] && continue
 				ln -sf -T "${name}.nicy" "${name}"

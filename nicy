@@ -1,28 +1,38 @@
 #!/bin/bash
 # vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 noet:
 
+shopt -s extglob
+
 PROG="nicy"
 
-for f in "/etc/${PROG}/environment" \
-	"${XDG_CONFIG_HOME:-$HOME/.config}/${PROG}/environment"; do
-	[ -f "$f" ] && . "$f"
+# The user 's configuration files always get the highest priority.
+for dir in "/usr/local/etc" "/etc" \
+	"${XDG_CONFIG_HOME:-$HOME/.config}"; do
+	[ -f "${dir}/${PROG}/environment" ] && . "${dir}/${PROG}/environment"
 done
-
-# User configuration files first in order to use them, and not the global
-# ones when parsing rules.
 [ ${#NICY_SEARCH_DIRS[@]} -eq 0 ] &&
-	NICY_SEARCH_DIRS=( "$HOME/.config/${PROG}" "/etc/${PROG}" "/usr/local/etc/{$PROG}" )
+	NICY_SEARCH_DIRS=(
+		"$HOME/.config/${PROG}"
+		"/etc/${PROG}"
+		"/usr/local/etc/{$PROG}"
+	)
 
-# Show what command is launched
+# Show what's going on
 NICY_VERBOSE=${NICY_VERBOSE:-"n"}
 
 QUIET=n
-[ "$NICY_VERBOSE" = "y" ] && VERBOSE=1 || VERBOSE=0
+VERBOSE=0
+[ "$NICY_VERBOSE" = "y" ] &&
+	VERBOSE=1
 USE_TYPE=auto
 USE_CGROUP=null
+FORCE_CGROUP=n
 ALWAYS_USE_SCOPE=n
 DRY_RUN=n
-FLAG_SHOW=n
+LIST_KEYS=
+DIR_KEYS=
+
+SUBCMD=exec
 
 # Optional hard-coded color management #{{{
 COLORS="n"
@@ -37,116 +47,149 @@ if [ -t 1 ] && [ "$COLORS" = "y" ]; then
 	RESET=$(tput sgr0)
 fi #}}}
 
-declare -ga search_dirs=("${NICY_SEARCH_DIRS[@]}")
+declare -ga search_dirs
+for dir in "${NICY_SEARCH_DIRS[@]}"; do
+	[ -d "$dir" ] && search_dirs+=("$dir")
+done
 
 CACHEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
 mkdir -p "$CACHEDIR"
 
 usage() { #{{{
-	width=$(echo "cols=$(tput cols); if (cols < 79) cols else 79" | bc -l)
-	printf "Usage: $PROG [-s|-n|(-q|-v)] [-m] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}] [--] COMMAND [ARGS]...\n"
-	printf "       $PROG --reset\n"
-	printf "       $PROG -k (rules|types|cgroups)[:DIR]\n"
-	printf "\nOptions:\n"
-	column -c "$width" -t -N switches,text -W text -d -s "#" <<EOF
- -s, --get-script#
- -n, --dry-run#Display but do not run any command.
- -q, --quiet#Be quiet and suppress additional informational output.
- -v, --verbose#Be verbose and display which command is launched.
- -m, --managed#Always run the command inside his own scope.
- -t, --type=TYPE#Control the set of properties applied. Accepts 'auto' that searches for the command rule set (default), 'cgroup-only' that removes any property except the cgroup, 'default' or any other configured type.
- -d, --default#Similar to '--type=default'. Do not search for a specific rule. Apply the fallback values from the 'default' type.
- -z, --cgroup-only#Similar to '--type=cgroup-only'. Unset all the defined properties, if any.
- -c, --cgroup=CGROUP#Run the command as part of this cgroup. The slice file that defines the cgroup must exist before running the command, since $PROG does not create it.
-     --cpu{QUOTA}#Similar to '--cgroup=cpu{QUOTA}', where QUOTA is a percentage relative to the total CPU time available on all CPU cores.
-     --reset#Rebuild the volatile cache and exit.
- -k, --keys=KIND[:DIR]#Dump the known values for the required KIND of keys.  Only from DIR folder, if present.
- -h, --help#Display this help and exit.
-EOF
+	cat <<-_EOF_
+	Usage:
+  $PROG [(-q|-v)|-n|-s] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}|-m] CMD [ARGS]…
+  $PROG --rebuild
+  $PROG -k (rules|types|cgroups) [--from-dir=DIR]
+
+	Options:
+  -q, --quiet          Be quiet and suppress additional informational output.
+  -v, --verbose        Be verbose and display which command is launched.
+  -n, --dry-run        Display commands but do not run them.
+  -s, --build-script   Build a script that replaces the current commandline,
+                       excluding the final arguments, and display it.
+
+  -t, --type=TYPE      Control the set of properties applied. Use 'auto' to sea-
+                       rch for the command rule set (default), 'cgroup-only' to
+                       remove any property except the cgroup, 'default' or an
+                       other defined type TYPE.
+  -d, --default        Like '--type=default'. Do not search for a rule.
+                       Apply the fallback values from the 'default' type.
+  -z, --cgroup-only    Like '--type=cgroup-only'. Unset all other properties.
+
+  -c, --cgroup=CGROUP  Run the command as part of this existing CGROUP.
+      --cpu{QUOTA}     Like '--cgroup=cpu{QUOTA}' where QUOTA is a percentage
+                       relative to the total CPU time available on all cores.
+  -m, --managed        Run the command in a transient scope managed by a service
+                       manage whether a cgroup has been set or not.
+  -u, --force-cgroup   Run the command as part of the cgroup, if available, that
+                       matches a relevant property found in rule, if a cgroup
+                       has not been set yet.
+
+      --rebuild        Rebuild the volatile cache and exit.
+
+  -k, --keys=KIND      List known KIND keys.
+      --from-dir=DIR   Limit keys search to configuration files from DIR folder.
+
+  -h, --help           Display this help and exit.
+	_EOF_
 } #}}}
 
 error_exit() { #{{{
-	echo -e "${COLORR}$PROG: error: ${2:-'unknown error'}${RESET}" 1>&2
+	echo -e "${COLORR}$PROG: error: ${2:-'unknown error'}${RESET}" >&2
 	exit "${1:-1}"
 } #}}}
 
 # Functions
-has_cgroup() { systemctl cat "${1}.slice" >/dev/null 2>&1 ; }
-has_quota() { [ $# -eq 0 ] && return 1 || has_cgroup "cpu${1}" ; }
+has_cgroup() { systemctl list-unit-files --no-legend "${1}.slice" &>/dev/null ; }
+has_cpuquota() { [ $# -eq 0 ] && return 1 || has_cgroup "cpu${1}" ; }
 
-find_any()  { #{{{
-	[ $# -lt 3 ] && return
-	kind=$1
-	key=$2
-	what=$3
-	pattern='"'"$key"'":[ ]*"'"$what"'"'
-	for confdir in "${search_dirs[@]}"; do
-		[ -d "$confdir" ] &&
-			grep -rh "$pattern" --include='*.'"$kind"'s' "$confdir"
-	done | grep -E -v '^[ ]*#' | head -n1
+list_files() { #{{{
+	[ $# -lt 2 ] && return 1
+	kind=${1,,}
+	kind=${kind%s}
+	shift
+	if [ "$kind" = "rule" ]; then
+		for confdir; do
+			[ ! -d "$confdir" ] && continue
+			find "$confdir" -mindepth 1 -maxdepth 1 -type d -print | \
+			sort -rg | while read -r dir; do
+				find $dir/ -mindepth 1 -type f -iname "*.rules" -print | sort -rg
+			done
+		done
+	elif [ "$kind" = "type" ] || [ "$kind" = "cgroup" ]; then
+		for confdir; do
+			[ ! -d "$confdir" ] && continue
+			find $confdir/ -mindepth 1 -maxdepth 1 -type f -iname "*.${kind}s" -print | \
+			sort -rg
+		done
+	fi
 } #}}}
 
-default() { find_any "type" "type" "default" ; }
-
-dump_content() {
-	[ $# -lt 2 ] && return
-	kind=${1%s}
+dump_content() { #{{{
+	[ $# -lt 2 ] && return 1
+	kind=${1,,}
+	kind=${kind%s}
 	shift
-	for confdir; do
-		[ -d "$confdir" ] &&
-			grep -rhE -v "^[ ]*#|^$" "--include=*.${kind}s" "$confdir"
-	done
-}
+	list_files "$kind" "$@" | xargs sed -s '/^[ ]*#/d; /^$/d'
+} #}}}
 
 find_all()  { #{{{
-	[ $# -ne 1 ] && return
-	kind=$1
+	[ $# -ne 1 ] && return 1
+	kind=${1,,}
+	kind=${kind%s}
 	dump_content "$kind" "${search_dirs[@]}"
 } #}}}
 
 unique_by() {
-	[ $# -eq 0 ] && return
+	[ $# -eq 0 ] && return 1
 	key=$1
 	jq -sMcr "unique_by(.$key) | .[] | .$key" -
 }
 
-dump_keys()  { #{{{
-	[ $# -eq 0 ] && return 1
-	kind=${1%s}
+get_keys()  { #{{{
+	[ $# -lt 2 ] && return 1
+	kind=${1,,}
+	kind=${kind%s}
 	case "$kind" in
 		rule) key="name" ;;
 		type | cgroup) key=$kind ;;
 		*) return 1 ;;
 	esac
 	shift
-	[ $# -eq 0 ] &&
-		set -- "${search_dirs[@]}"
 	dump_content "$kind" "$@" | unique_by "$key"
 } #}}}
 
-prepare_json()  { #{{{
+make_json_cache()  { #{{{
 	[ -z "$1" ] &&
-		return
+		return 1
+	kind=${1,,}
+	kind=${kind%s}
 	[[ "$1" =~ (rule|type|cgroup) ]] ||
-		return
+		return 1
 	dest="$CACHEDIR/${1}s"
-	[ "$1" != "rule" ] &&
-		key=$1 ||
-		key="name"
-	[ ! -f "$dest" ] &&
+	if [ ! -f "$dest" ]; then
+		[ "$1" != "rule" ] &&
+			key=$1 ||
+			key="name"
 		find_all "$1" | \
 		jq -sMcr  '[.[]|map_values(tostring)]|unique_by(.'"$key"')|.[]' >"$dest"
+	fi
+} #}}}
+
+check_or_build_cache () { #{{{
+	for item in "rule" "type" "cgroup"; do
+		make_json_cache "$item"
+	done
 } #}}}
 
 set_filter()  { #{{{
-	for item in "rule" "type" "cgroup"; do
-		prepare_json "$item"
-	done
+	check_or_build_cache
 	type_def="def type_def(\$t): \$types|first(.[]|select(.type == \$t))?;"
 	cgroup_def="def cgroup_def(\$c): \$cgroups|first(.[]|select(.cgroup == \$c))? // {} ;"
 	update_type='if has("type") then type_def(.type) + . else . end'
 	update_cgroup='if has("cgroup") then cgroup_def(.cgroup) + . else . end'
-	remove_keys='del(.name, .type, .cgroup)'
+	remove_keys='del(.name, .type)' # keep track of cgroup
 	to_entries='to_entries|.[]|"\(.key)=\(.value)"'
 	force_cgroup='if ($cgroup != "null") then . + cgroup_def($cgroup) else . end'
 	default='type_def("default") // {}'
@@ -182,9 +225,19 @@ set_properties () { # {{{
 	get_entries "$1" | while read -r option; do
 		value=${option##*=}
 		case "$option" in
-			CPUQuota=*) # discrete values
-				has_quota "$value" &&
-					echo "my_cpuquota=$value" ||
+			cgroup=*)
+				# TODO: Cgroups values should be checked when parsing command-line
+				# options (mostly done) and when updating the configuration files.
+				# Add a switch to nicy command to parse and validate them.
+				has_cgroup "$value" &&
+					echo "USE_CGROUP=$value" ||
+					error_exit 1 "not valid cgroup value '$value'." ;;
+			CPUQuota=*) # percent, range 1..99
+				# This property either belongs to some cgroup definition, either will
+				# be applied through the transient scope.
+				percent=${value%\%}
+				[[ $percent -ge 1 ]] && [[ $percent -le 99 ]] &&
+					echo "my_cpuquota=$percent" ||
 					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
 			sched=*) # other, batch, idle, fifo or rr (man 2 sched_setscheduler)
 				[[ "$value" =~ ^(other|fifo|rr|batch|idle)$ ]] &&
@@ -210,47 +263,56 @@ set_properties () { # {{{
 				[[ $value -ge -1000 ]] && [[ $value -le 1000 ]] &&
 					echo "my_oomscoreadjust=$value" ||
 					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
-			# More options added here
-			ioweight=*) # range 1..10000
+			# Some more options from man 5 systemd.resource-control
+			IOWeight=*) # range 1..10000
 				[[ $value -ge -1 ]] && [[ $value -le 10000 ]] &&
 					echo "my_ioweight=$value" ||
 					error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
-			# TODO: Check values for memory properties
-			memhigh=*) # bytes (K, M, G and T suffix), percent or infinity
-				echo "my_memhigh=$value" ;;
-			memmax=*) # bytes (K, M, G and T suffix), percent or infinity
-				echo "my_memmax=$value" ;;
+			MemoryHigh=*|MemoryMax=*) # bytes (K, M, G and T suffix), percent or infinity
+				case "$value" in
+					infinity) ;;
+					?([0-9])[0-9]?(%))
+						[[ ${value%\%} -eq 0 ]] &&
+							error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+					+([0-9])?(K|M|G|T))
+						[[ ${value%[^[:digit:]]} -eq 0 ]] &&
+							error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+					*)
+						error_exit 1 "wrong '${option%%=*}' option: $value. Aborting." ;;
+				esac
+				echo "${option%%=*}=$value" ;;
+			cmdargs=*)
+				echo "my_cmdargs='$value'" ;;
 		esac
 	done
 } #}}}
 
 # Parse options
 OPTIND=1
-while getopts ":-:hsnqvt:c:k:dz" option; do #{{{
+while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
 	case $option in
 		-)
 			case "$OPTARG" in
-				help)
-					usage
-					exit 0
-					;;
-				reset)
-					(cd $CACHEDIR && rm -f rules types cgroups)
-					exit 0
-					;;
+				help) SUBCMD=usage ; break ;;
+				rebuild) SUBCMD=rebuild ; break ;;
 				dry-run) DRY_RUN=y ;;
 				quiet) QUIET=y ;;
 				verbose) VERBOSE=$(( $VERBOSE + 1 )) ;;
-				type=*)
-					# Accepts auto, default, cgroup-only or any known type
-					case "${OPTARG##*=}" in
-						auto|default|cgroup-only) USE_TYPE="${OPTARG##*=}" ;;
-						# TODO: Check that type is valid
-						*) USE_TYPE="${OPTARG##*=}" ;;
-					esac
+				type=*) # Accepts auto, default, cgroup-only or any known type
+					value=${OPTARG#type=}
+					value=${value,,}
+					if [[ "$value" =~ (auto|default|cgroup-only) ]]; then
+						USE_TYPE="$value"
+					else
+						case "$(get_keys "types" "${search_dirs[@]}")" in
+							*"$value"*) USE_TYPE="$value" ;;
+							*) error_exit 1 "not valid type value '$value'." ;;
+						esac
+					fi
 					;;
 				cgroup=*)
-					value=${OPTARG##*=}
+					value=${OPTARG#cgroup=}
+					value=${value,,}
 					has_cgroup "$value" &&
 						USE_CGROUP="$value" ||
 						error_exit 1 "not valid cgroup value '$value'."
@@ -258,28 +320,33 @@ while getopts ":-:hsnqvt:c:k:dz" option; do #{{{
 				default) USE_TYPE="default" ;;
 				cgroup-only) USE_TYPE="cgroup-only" ;;
 				managed) ALWAYS_USE_SCOPE=y ;;
+				force-cgroup) FORCE_CGROUP=y ;;
 				cpu*)
 					has_cgroup "$OPTARG" &&
 						USE_CGROUP="$OPTARG" ||
 						error_exit 1 "unknown option '--$OPTARG'."
 					;;
-				get-script) FLAG_SHOW=y ;;
+				build-script) SUBCMD=show-script ;;
 				keys=*)
-					splitpart=${OPTARG##*=}
-					kind=${splitpart%%:*}
-					dir=${splitpart#*:}
-					[ "$dir" = "$kind" ] && unset dir
+					kind=${OPTARG#keys=}
 					kind=${kind,,}
 					kind=${kind%s}
 					case "$kind" in
 						rule|type|cgroup)
-							[ -z "$dir" ] && dump_keys "$kind"
-							[ -n "$dir" ] && [ -d "$dir" ] &&
-								dump_keys "$kind" "$dir"
-							exit 0
+							SUBCMD=list
+							LIST_KEYS=$kind
 							;;
-						*) error_exit 1 "can't dump anything with '${OPTARG##*=}'." ;;
+						*) error_exit 1 "not valid keys value '${OPTARG##*=}'.";;
 					esac
+					;;
+				from-dir=*)
+					[ -z "$LIST_KEYS" ] &&
+						error_exit 1 "missing required '--keys' option"
+					dir=${OPTARG#from-dir=}
+					dir=$(eval echo "$dir")
+					[ -d "$dir" ] &&
+						DIR_KEYS=$dir ||
+						error_exit 1 "no such directory '$dir'"
 					;;
 				-) break ;;
 				*) error_exit 1 "unknown option '$OPTARG'." ;;
@@ -289,13 +356,13 @@ while getopts ":-:hsnqvt:c:k:dz" option; do #{{{
 			usage
 			exit 0
 			;;
-		s) FLAG_SHOW=y ;;
+		s) SUBCMD=show-script ;;
 		n) DRY_RUN=y ;;
 		q) QUIET=y ;;
 		v) VERBOSE=$(( $VERBOSE + 1 )) ;;
 		m) ALWAYS_USE_SCOPE=y ;;
-		t)
-			# Accepts auto, default, cgroup-only or any known type
+		u) FORCE_CGROUP=y ;;
+		t) # Accepts auto, default, cgroup-only or any known type
 			case "$OPTARG" in
 				auto|default|cgroup-only) USE_TYPE="$OPTARG" ;;
 				# TODO: Check that type is valid
@@ -310,19 +377,14 @@ while getopts ":-:hsnqvt:c:k:dz" option; do #{{{
 		d) USE_TYPE="default" ;;
 		z) USE_TYPE="cgroup-only" ;;
 		k)
-			kind=${OPTARG%%:*}
-			dir=${OPTARG#*:}
-			[ "$dir" = "$kind" ] && unset dir
-			kind=${kind,,}
+			kind=${OPTARG,,}
 			kind=${kind%s}
 			case "$kind" in
 				rule|type|cgroup)
-					[ -z "$dir" ] && dump_keys "$kind"
-					[ -n "$dir" ] && [ -d "$dir" ] &&
-						dump_keys "$kind" "$dir"
-					exit 0
+					SUBCMD=list
+					LIST_KEYS=$kind
 					;;
-				*) error_exit 1 "can't dump anything with '${OPTARG##*=}'." ;;
+				*) error_exit 1 "not valid keys value '${OPTARG}'.";;
 			esac
 			;;
 		\?) error_exit 1 "unknown option '$OPTARG'." ;;
@@ -331,9 +393,32 @@ while getopts ":-:hsnqvt:c:k:dz" option; do #{{{
 done #}}}
 shift $(($OPTIND - 1))
 
-[ $# -lt 1 ] &&
-	usage &&
-	exit 1
+# [ $# -lt 1 ] &&
+#   usage &&
+#   exit 1
+
+case "$SUBCMD" in
+	usage)
+		usage
+		exit 0
+		;;
+	list)
+		[ -z "$DIR_KEYS" ] &&
+			get_keys "$LIST_KEYS" "${search_dirs[@]}" ||
+			get_keys "$LIST_KEYS" "$DIR_KEYS"
+		exit 0
+		;;
+	rebuild)
+		(cd $CACHEDIR && rm -f rules types cgroups)
+		check_or_build_cache
+		exit $?
+		;;
+	*)
+		[ $# -lt 1 ] &&
+			usage &&
+			exit 1
+		;;
+esac
 
 unset my_quiet
 ([ "$QUIET" = "y" ] || [ $VERBOSE -lt 2 ]) &&
@@ -341,7 +426,7 @@ my_quiet="--quiet"
 [ "$QUIET" = "y" ] &&
 	VERBOSE=0
 
-name=$(basename "$1")
+my_name=$(basename "$1")
 
 # Prevent nasty loops if using nested nicy commands
 pattern="${HOME}/.*nicy.*"
@@ -349,10 +434,10 @@ realpath=$(which "$1")
 [ -z "$realpath" ] &&
 	error_exit 1 "$1 not found"
 realpath=$(readlink -f "$realpath")
-if [ "$1" = "$name" ] || [[ "$realpath" =~ $pattern ]]; then
+if [ "$1" = "$my_name" ] || [[ "$realpath" =~ $pattern ]]; then
 	# Strip suffix if any
-	name=${name%.nicy}
-	for realpath in $(which -a "$name"); do
+	my_name=${my_name%.nicy}
+	for realpath in $(which -a "$my_name"); do
 		# Skip path that contains "nicy"
 		[[ "$realpath" =~ $pattern ]] && continue
 		cmdpath=$realpath
@@ -368,21 +453,22 @@ fi
 # Properties
 declare -g my_cpuquota my_sched my_rtprio my_niceness \
 	my_ioclass my_ionice my_ioweight \
-	my_oomscoreadjust my_memhigh my_memmax
+	my_oomscoreadjust my_memoryhigh my_memorymax \
+	my_cmdargs
 
-# Populate them
-eval $(set_properties "$name")
+# Populate
+eval $(set_properties "$my_name")
 
-# Evaluate if running the command in a scope is required
+# Check if running the command in a scope is required
 SCOPE_REQUIRED=n
 if [ -v my_cpuquota ] || [ -v my_ioweight ] ||
-	[ -v my_memhigh ] || [ -v my_memmax ] ||
+	[ -v my_memoryhigh ] || [ -v my_memorymax ] ||
 	[ "$ALWAYS_USE_SCOPE" = "y" ]; then
 	SCOPE_REQUIRED=y
 fi
 
 # Command passed to `exec`, if no scope is required, or to `systemd-run`
-declare -ga final_cmd=("$cmdpath")
+declare -ga my_exec_cmd=("$cmdpath")
 
 apply_renice () { #{{{
 	if [ -v my_niceness ]; then
@@ -400,7 +486,7 @@ apply_oomscore () { #{{{
 		if [ "$SCOPE_REQUIRED" = "n" ]; then
 			echo "${cmd[@]}" "-p \$$ >/dev/null 2>&1"
 		else
-			final_cmd=("${cmd[@]}" "--" "${final_cmd[@]}")
+			my_exec_cmd=("${cmd[@]}" "--" "${my_exec_cmd[@]}")
 		fi
 	fi
 } #}}}
@@ -442,7 +528,7 @@ apply_schedtool () { #{{{
 	fi
 	if [ -v my_rtprio ]; then
 		if [ "$my_sched" = "fifo" ] || [ "$my_sched" = "rr" ] ||
-		(schedtool $$ | grep -q -E -e "POLICY (F|R)") ; then
+			[[ "$(schedtool $$)" =~ '.* POLICY (F|R):.*' ]]; then
 			sched_args+=("-p" "$my_prio")
 		fi
 	fi #}}}
@@ -451,7 +537,7 @@ apply_schedtool () { #{{{
 		if [ "$SCOPE_REQUIRED" = "n" ]; then
 			echo "${cmd[@]}" "\$$ >/dev/null 2>&1"
 		else
-			final_cmd=("${cmd[@]}" "-e" "${final_cmd[@]}")
+			my_exec_cmd=("${cmd[@]}" "-e" "${my_exec_cmd[@]}")
 		fi
 	fi
 } #}}}
@@ -504,31 +590,104 @@ apply_ionice () { #{{{
 		if [ "$SCOPE_REQUIRED" = "n" ]; then
 			echo "${cmd[@]}" "-p \$$ >/dev/null 2>&1"
 		else
-			final_cmd=("${cmd[@]}" "${final_cmd[@]}")
+			my_exec_cmd=("${cmd[@]}" "${my_exec_cmd[@]}")
 		fi
 	fi
 } #}}}
 
-exec_cmd () { #{{{
+complete_cmd () { #{{{
 	if [ "$SCOPE_REQUIRED" = "y" ]; then
 		cmd=("exec" "systemd-run" "-G" "-d" "$my_quiet")
+		# No authentication for privileged operations.
+		cmd+=("--no-ask-password")
+		cmd+=("--scope" "--unit=$(basename "$my_name")-\$$")
+		SLICE_IS_SET=n
+		case "$USE_CGROUP" in
+			cpu*)
+				SLICE_IS_SET=y
+				# Children in sub-hierarchy can't control 'cpu' cgroup controller.
+				unset my_cpuquota
+				;;
+			mem*)
+				SLICE_IS_SET=y
+				# Children in sub-hierarchy can't control 'memory' cgroup controller.
+				unset my_memoryhigh my_memorymax
+				;;
+			io*)
+				SLICE_IS_SET=y
+				# Children in sub-hierarchy can't control 'io' cgroup controller.
+				unset my_ioweight
+				;;
+			*)
+				if [ -v my_cpuquota ] && [ "$FORCE_CGROUP" = "y" ]; then
+					# Find a cgroup definition matching required CPUQuota property
+					filter='first(.[]|select(.CPUQuota == "'"$my_cpuquota"'"))?|.cgroup'
+					cgroup=$(cat "${CACHEDIR}/cgroups" | jq -sMcr $filter)
+					if [ -n "$cgroup" ]; then
+						USE_CGROUP="$cgroup"
+						SLICE_IS_SET=y
+						unset my_cpuquota
+					fi
+				elif [ "$SLICE_IS_SET" = "n" ] &&
+					[ -v my_memoryhigh ] && [ "$FORCE_CGROUP" = "y" ]; then
+					# Find a cgroup definition matching required MemoryHigh property
+					filter='first(.[]|select(.MemoryHigh == "'"$my_memoryhigh"'"))?|.cgroup'
+					cgroup=$(cat "${CACHEDIR}/cgroups" | jq -sMcr $filter)
+					if [ -n "$cgroup" ]; then
+						USE_CGROUP="$cgroup"
+						SLICE_IS_SET=y
+						unset my_memoryhigh
+					fi
+				elif [ "$SLICE_IS_SET" = "n" ] &&
+					[ -v my_memorymax ] && [ "$FORCE_CGROUP" = "y" ]; then
+					# Find a cgroup definition matching required MemoryMax property
+					filter='first(.[]|select(.MemoryMax == "'"$my_memorymax"'"))?|.cgroup'
+					cgroup=$(cat "${CACHEDIR}/cgroups" | jq -sMcr $filter)
+					if [ -n "$cgroup" ]; then
+						USE_CGROUP="$cgroup"
+						SLICE_IS_SET=y
+						unset my_memorymax
+					fi
+				elif [ "$SLICE_IS_SET" = "n" ] &&
+					[ -v my_ioweight ] && [ "$FORCE_CGROUP" = "y" ]; then
+					# Find a cgroup definition matching required IOWeight property
+					filter='first(.[]|select(.IOWeight == "'"$my_ioweight"'"))?|.cgroup'
+					cgroup=$(cat "${CACHEDIR}/cgroups" | jq -sMcr $filter)
+					if [ -n "$cgroup" ]; then
+						USE_CGROUP="$cgroup"
+						SLICE_IS_SET=y
+						unset my_ioweight
+					fi
+				fi
+				;;
+		esac
+		# Finally
+		[ "$SLICE_IS_SET" = "y" ] &&
+			cmd+=("--slice=${USE_CGROUP}.slice")
 		[ $UID -ne 0 ] &&
-			cmd+=("--uid=\$UID")
-		cmd+=("--scope" "--unit=$(basename "$name")-\$$")
-		[ -v my_cpuquota ] &&
-			cmd+=("--slice=cpu${my_cpuquota}.slice")
+			cmd+=("--user")
+		# Add remaining properties to scope
+		# In nicy, the quota value as a percentage of total CPU time for ALL cores
+		if [ -v my_cpuquota ]; then
+			value=$(( $(nproc --all) * $my_cpuquota ))
+			cmd+=("-p" "CPUQuota=${value}%")
+		fi
 		[ -v my_ioweight ] &&
 			cmd+=("-p" "IOWeight=$my_ioweight")
-		[ -v my_memhigh ] &&
-			cmd+=("-p" "MemoryHigh=$my_memhigh")
-		[ -v my_memmax ] &&
-			cmd+=("-p" "MemoryMax=$my_memmax")
+		[ -v my_memoryhigh ] &&
+			cmd+=("-p" "MemoryHigh=$my_memoryhigh")
+		[ -v my_memorymax ] &&
+			cmd+=("-p" "MemoryMax=$my_memorymax")
 		[ -v my_niceness ] &&
 			cmd+=("--nice=$my_niceness")
 	else
 		cmd=("exec")
 	fi
-	echo "${cmd[@]}" "${final_cmd[@]}"
+	if [ -v my_cmdargs ]; then
+		mapfile -t args <<<"$(echo ${my_cmdargs:1:-1} |tr "," "\n")"
+		my_exec_cmd+=("${args[@]}")
+	fi
+	echo "${cmd[@]}" "${my_exec_cmd[@]}"
 } #}}}
 
 [ -f "$CACHEDIR/commands" ] && rm -f "$CACHEDIR/commands"
@@ -538,16 +697,17 @@ apply_renice >&3
 apply_oomscore >&3
 apply_schedtool >&3
 apply_ionice >&3
-exec_cmd >&3
+complete_cmd >&3
 exec 3>&-
 mapfile -t commands <"$CACHEDIR/commands"
 
-escaped () { #{{{
-	[ $# -eq 0 ] && return
-	printf '%q ' "$@"
+quoted () { #{{{
+	[ $# -gt 0 ] &&
+		printf ' %q' "$@"
+		# echo ${*@Q}
 } #}}}
 
-if [ "$FLAG_SHOW" = "y" ]; then
+if [ "$SUBCMD" = "show-script" ]; then
 	echo "#!/bin/bash"
 	for cmdline in "${commands[@]}"; do
 		[[ "$cmdline" =~ ^exec ]] &&
@@ -560,13 +720,13 @@ fi
 for cmdline in "${commands[@]}"; do
 	[ -z "$cmdline" ] &&
 		continue
-	splitcmd=($(eval echo $cmdline))
+	cmd=($(eval echo $cmdline))
 	[[ "$cmdline" =~ ^exec ]] &&
-		splitcmd+=("$@")
+		cmd+=("$@")
 	([ $VERBOSE -ge 1 ] || [ "$DRY_RUN" = "y" ]) &&
-		echo -e "${COLORG}${PROG}: $(escaped "${splitcmd[@]}")${RESET}" >&2
+		echo -e "${COLORG}${PROG}:$(quoted "${cmd[@]}")${RESET}" >&2
 	[ "$DRY_RUN" = "y" ] &&
 		continue
-	"${splitcmd[@]}"
+	"${cmd[@]}"
 done
 
