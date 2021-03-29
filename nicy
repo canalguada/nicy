@@ -17,7 +17,7 @@ done
 NICY_VERBOSE=${NICY_VERBOSE:-"n"}
 
 QUIET=n
-[ "$NICY_VERBOSE" = "y" ] && VERBOSE=1 || VEERBOSE=0
+[ "$NICY_VERBOSE" = "y" ] && VERBOSE=1 || VERBOSE=0
 USE_TYPE=auto
 USE_CGROUP=null
 ALWAYS_USE_SCOPE=n
@@ -226,7 +226,7 @@ set_properties () { # {{{
 
 # Parse options
 OPTIND=1
-while getopts ":-:hqvt:c:k:dz" option; do #{{{
+while getopts ":-:hsnqvt:c:k:dz" option; do #{{{
 	case $option in
 		-)
 			case "$OPTARG" in
