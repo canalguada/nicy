@@ -69,7 +69,7 @@ In each directory, there are 4 kind of files :
 
 - one **environment** file, at directory root, to adjust some default values
 - at least one **.cgroups** file and one **.types** file, at directory root
-- none or many **.rules** files in subdirectories
+- none or many **.rules** files in any subdirectory
 
 When parsing **.cgroups**, **.types** and **.rules** [json](https://en.wikipedia.org/wiki/JSON) configuration files, their path names are sorted by dictionary order to set priority. For instance, rules in **temp.rules** have an higher priority than any file in **50-custom** directory, so any rule that it defines takes precedence.
 ```
@@ -95,11 +95,11 @@ When parsing **.cgroups**, **.types** and **.rules** [json](https://en.wikipedia
         ├──tmux.rules
         └──vim.rules
 ```
-[Ananicy](https://github.com/Nefelim4ag/Ananicy) users can copy, or link, their configuration files in any directory.
+[Ananicy](https://github.com/Nefelim4ag/Ananicy) users can import their configuration files accordingly and start using nicy.
 ### .cgroups
 >   A control group (abbreviated as [cgroup](https://en.wikipedia.org/wiki/Cgroups)) is a collection of processes that are bound by the same criteria and associated with a set of parameters or limits.
 
-The .cgroups file lists in json format this set of parameters or limits for each named cgroup. For instance :
+The .cgroups file lists in json format this set of parameters or limits for each cgroup. For instance :
 
 `{ "cgroup": "cpu66", "CPUQuota": "66%" }`
 
@@ -114,7 +114,7 @@ The *cgroup* pair is mandatory. All other pairs are optional and will be ignored
 
 Also see [systemd.resource-control(5)](https://www.freedesktop.org/software/systemd/man/systemd.resource-control.html).
 
-Nicy relies on [systemd slice units](https://www.freedesktop.org/software/systemd/man/systemd.slice.html) to manage cgroups, but **do not create them at runtime** : a .cgroups file is required in order to declare which existing cgroup is available. A bunch of slice units are created for the cpu cgroup controller and both system and user manager, at install time (see Makefile).
+Nicy relies on [systemd slice units](https://www.freedesktop.org/software/systemd/man/systemd.slice.html) and manages cgroups at run-time : a .cgroups file is required in order to declare available cgroups.
 ### .types
 Writing a full rule for each program, out of many that nicy may run, would turn boring.
 
@@ -162,8 +162,12 @@ With the above configuration, the command `nicy firefox` and the following bash 
 ```
 #!/bin/bash
 ulimit -S -e 23
-exec systemd-run -G -d --quiet --no-ask-password --scope \
-    --unit=firefox-$$ --slice=cpu66.slice --user \
+USER_OR_NOT=$([ $UID -ne 0 ] && echo "--user")
+systemctl $USER_OR_NOT start nicy-cpu66.slice
+systemctl $USER_OR_NOT --runtime set-property nicy-cpu66.slice \
+    CPUQuota=66%
+exec systemd-run -G -d --quiet --no-ask-password $USER_OR_NOT \
+    --unit=firefox-$$ --scope --slice=nicy-cpu66.slice \
     --nice=-3 -p MemoryHigh=60% -p MemoryMax=75% \
     choom -n 1000 -- `command -v firefox` "$@"
 ```
