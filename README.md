@@ -1,24 +1,24 @@
 # Nicy
 ## About
-A bash script that launches a program and limits the resources that its spawned processes can share.
+A bash script that limits the resources that a launched program and its spawned processes can share.
 ## Why
-My legacy low-end hardware quickly turns nasty, running hot then shutting down, if launching too many or "resource hungry" softwares. But capping the resources that some programs request turns it useful again.
+My legacy low-end hardware quickly turns nasty, running hot then shutting down, when launching too many or "resource hungry" softwares. But capping the resources that some programs request turns it useful again.
 
 I used to install [Ananicy](https://github.com/Nefelim4ag/Ananicy), an auto nice daemon, with community rules support, that relies too on the Linux Control Groups ([Cgroups](https://en.wikipedia.org/wiki/Cgroups)).
 
-You should give it a try before going on with nicy.
-
 I write nicy because I need to control the available resources per program according to some more context, thus adding options in a command line, not modifying a configuration file as a privileged user.
 
-## Requirements
-* [systemd](https://systemd.io/)
-* [jq](https://stedolan.github.io/jq/), a lightweight and flexible command-line JSON processor
-* [schedtool](https://github.com/freequaos/schedtool), a tool to change or query all CPU-scheduling policies
-
-The unified control group hierarchy is the new version of kernel control group interface, see [Control Groups v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html). Most of cgroup settings are supported only if the unified control group hierarchy is used. 
 ## Usage
 ```
-nicy [(-q|-v)|-n|-s] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}|-m] CMD [ARGS]…
+$ nicy --dry-run nvim-qt
+nicy: ulimit -S -e 23 &>/dev/null
+nicy: systemctl --user start nicy-cpu66.slice &>/dev/null
+nicy: systemctl --user --runtime set-property nicy-cpu66.slice CPUQuota=66% &>/dev/null
+nicy: exec systemd-run --user -G -d --no-ask-password --quiet --unit=nvim-qt-13480 --scope --slice=nicy-cpu66.slice --nice=-3 -E 'SHELL=/bin/bash' /usr/bin/nvim-qt --nofork --nvim /usr/bin/nvim
+
+$ nicy --help
+Usage:
+nicy [(-q|-v)|-n|-s] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}] [-u] [-m] CMD [ARGS]…
 nicy --rebuild
 nicy -k (rules|types|cgroups) [--from-dir=DIR]
 
@@ -38,15 +38,16 @@ Options:
   -z, --cgroup-only    Like '--type=cgroup-only'. Unset all other properties.
 
   -c, --cgroup=CGROUP  Run the command as part of this existing CGROUP.
-      --cpu{QUOTA}     Like '--cgroup=cpu{QUOTA}' where QUOTA is a percentage
-                       relative to the total CPU time available on all cores.
-  -m, --managed        Run the command in a transient scope managed by a service
-                       manage whether a cgroup has been set or not.
-  -u, --force-cgroup   Run the command as part of the cgroup, if available, that
-                       matches a relevant property found in rule, if a cgroup
-                       has not been set yet.
+      --cpu{QUOTA}     Like '--cgroup=cpu{QUOTA}' where QUOTA is an integer that
+                       represents a percentage relative to the total CPU time
+		       available on all cores.
 
-      --rebuild        Rebuild the volatile cache and exit.
+  -m, --managed        Always run the command in a transient scope.
+  -u, --force-cgroup   Run the command as part of an existing cgroup, if any,
+                       that matches properties found, when no other cgroup has
+                       been set.
+
+      --rebuild        Rebuild the cache and exit.
 
   -k, --keys=KIND      List known KIND keys.
       --from-dir=DIR   Limit keys search to configuration files from DIR folder.
@@ -54,24 +55,32 @@ Options:
   -h, --help           Display this help and exit.
 ```
 
-## Installation
-`$ sudo make install`
+## Requirements
+* [systemd](https://systemd.io/) and [systemd-run](https://www.freedesktop.org/software/systemd/man/systemd-run.html)
+* [jq](https://stedolan.github.io/jq/), a lightweight and flexible command-line JSON processor
+* [schedtool](https://github.com/freequaos/schedtool), a tool to change or query all CPU-scheduling policies
 
-`prefix` path defaults to /usr/local.
+Most of cgroup settings are supported only if the unified control group hierarchy, the new version of kernel control group interface, see [Control Groups v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html), is used. 
+## Installation
+Install as root in /usr/local.
+`# make install`
+
+Install as root in /usr.
+`# make prefix=/usr install`
 ## Configuration
-Nicy configuration is read from the following directories, when they exists, in this order of preference :
+Nicy configuration is read from the following directories, in this order of preference :
 
 - $XDG_CONFIG_HOME/nicy
 - /etc/nicy
 - /usr/local/etc/nicy
 
-In each directory, there are 4 kind of files :
+4 kinds of files are parsed :
 
-- one **environment** file, at directory root, to adjust some default values
-- at least one **.cgroups** file and one **.types** file, at directory root
+- one **environment** file, at any directory root, to adjust default values
+- at least one **.cgroups** file and one **.types** file, at any directory root
 - none or many **.rules** files in any subdirectory
 
-When parsing **.cgroups**, **.types** and **.rules** [json](https://en.wikipedia.org/wiki/JSON) configuration files, their path names are sorted by dictionary order to set priority. For instance, rules in **temp.rules** have an higher priority than any file in **50-custom** directory, so any rule that it defines takes precedence.
+Moreover, when parsing **.cgroups**, **.types** and **.rules** [json](https://en.wikipedia.org/wiki/JSON) configuration files, path names are sorted by dictionary order to set priority.
 ```
 /usr/local/etc/nicy
 ├──00-cgroups.cgroups
@@ -95,6 +104,8 @@ When parsing **.cgroups**, **.types** and **.rules** [json](https://en.wikipedia
         ├──tmux.rules
         └──vim.rules
 ```
+For instance, rules in `temp.rules` have an higher priority than any rule from a file in `50-custom` directory, and types defined in `/home/user/.config/nicy` take precedence on any type from `/usr/local/etc/nicy`.
+
 [Ananicy](https://github.com/Nefelim4ag/Ananicy) users can import their configuration files accordingly and start using nicy.
 ### .cgroups
 >   A control group (abbreviated as [cgroup](https://en.wikipedia.org/wiki/Cgroups)) is a collection of processes that are bound by the same criteria and associated with a set of parameters or limits.
@@ -114,11 +125,11 @@ The *cgroup* pair is mandatory. All other pairs are optional and will be ignored
 
 Also see [systemd.resource-control(5)](https://www.freedesktop.org/software/systemd/man/systemd.resource-control.html).
 
-Nicy relies on [systemd slice units](https://www.freedesktop.org/software/systemd/man/systemd.slice.html) and manages cgroups at run-time : a .cgroups file is required in order to declare available cgroups.
+Nicy relies on [systemd slice units](https://www.freedesktop.org/software/systemd/man/systemd.slice.html) to manage cgroups at run-time : a .cgroups file is required in order to declare available cgroups.
 ### .types
 Writing a full rule for each program, out of many that nicy may run, would turn boring.
 
-The .types file groups sets of properties in order to define program families. For instance, whether you run `nicy chromium` or `nicy firefox` you will probably set an higher scheduling priority for all processes, adjust the OOM score, and limit the available CPU time. So instead of writing twice, or more, the same rule with the same properties, you create a **type** like this.
+The .types file groups sets of properties in order to define program families. For instance, whether you run `nicy chromium` or `nicy firefox` you will probably set an higher scheduling priority for all processes, adjust the OOM score, and limit the available CPU time. So instead of writing twice, or more, the same rule with the same properties, you create a **type**.
 
 `{ "type": "Web-Browser", "nice": -3, "oom_score_adj": 1000, "CPUQuota": "66%" }`
 
@@ -151,22 +162,21 @@ Once the available cgroups and types have been set, subdirectories can be filled
 { "name": "chromium", "type": "Web-Browser" }
 { "name": "firefox", "type": "Web-Browser" }
 ```
-More properties can be added to the rule. For instance, any browser quickly stands out as a memory hog, opening too many tabs, and it may be useful to limit the memory available for that program.
+More properties can be added to the rule. For instance, any browser could quickly stands out as a memory hog if opening too many tabs, and it may be useful to limit the memory available for that program.
 ```
 { "name": "chromium", "type": "Web-Browser", "MemoryHigh": "60%", "MemoryMax": "75%" }
 { "name": "firefox", "type": "Web-Browser", "MemoryHigh": "60%", "MemoryMax": "75%" }
 ```
-The *name* pair is mandatory. All other pairs are optional and will be ignored if the key doesn't match the above defined ones for .cgroups and .types files.
+The *name* pair is mandatory. All other pairs are optional and will be ignored if the key doesn't match neither the pairs defined for .cgroups and .types files, nor *env* and *cmdargs* pairs, that respectively allow to specify environment variables and arguments passed to the command.
 
-With the above configuration, the command `nicy firefox` and the following bash script are then almost interchangeable :
+With the given configuration, the command `nicy firefox` almost replaces the script below :
 ```
 #!/bin/bash
-ulimit -S -e 23
-USER_OR_NOT=$([ $UID -ne 0 ] && echo "--user")
-systemctl $USER_OR_NOT start nicy-cpu66.slice
-systemctl $USER_OR_NOT --runtime set-property nicy-cpu66.slice \
-    CPUQuota=66%
-exec systemd-run -G -d --quiet --no-ask-password $USER_OR_NOT \
+[ $UID -ne 0 ] && user_or_system=--user
+ulimit -S -e 23 &>/dev/null
+systemctl ${user_or_system} start nicy-cpu66.slice &>/dev/null
+systemctl ${user_or_system} --runtime set-property nicy-cpu66.slice CPUQuota=66% &>/dev/null
+exec systemd-run ${user_or_system} -G -d --no-ask-password --quiet \
     --unit=firefox-$$ --scope --slice=nicy-cpu66.slice \
     --nice=-3 -p MemoryHigh=60% -p MemoryMax=75% \
     choom -n 1000 -- `command -v firefox` "$@"

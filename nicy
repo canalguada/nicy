@@ -1,70 +1,21 @@
 #!/bin/bash
-# vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 noet:
+# vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 et:
 
-shopt -s extglob
+set -o pipefail
+set -o errtrace
+set -o nounset
+set -o errexit
 
 PROG="nicy"
 
-# The user 's configuration files always get the highest priority.
-for dir in "/usr/local/etc" "/etc" \
-	"${XDG_CONFIG_HOME:-$HOME/.config}"; do
-	[ -f "$dir/$PROG/environment" ] && . "$dir/$PROG/environment"
-done
-[ ${#NICY_SEARCH_DIRS[@]} -eq 0 ] &&
-	NICY_SEARCH_DIRS=("$HOME/.config/$PROG" "/etc/$PROG" "/usr/local/etc/$PROG")
-
-# Show what's going on
-NICY_VERBOSE=${NICY_VERBOSE:-"n"}
-
-QUIET=n
-VERBOSE=0
-[ "$NICY_VERBOSE" = "y" ] &&
-	VERBOSE=1
-USE_TYPE=auto
-USE_CGROUP=null
-FORCE_CGROUP=n
-ALWAYS_USE_SCOPE=n
-DRY_RUN=n
-LIST_KEYS=
-DIR_KEYS=
-
-SUBCMD=exec
-
-# Optional hard-coded color management #{{{
-COLORS="n"
-COLORG=
-COLORR=
-UNDERLINE=
-RESET=
-if [ -t 1 ] && [ "$COLORS" = "y" ]; then
-	COLORR=$(tput setaf 1)
-	COLORG=$(tput setaf 2)
-	UNDERLINE=$(tput smul)
-	RESET=$(tput sgr0)
-fi #}}}
-
-declare -ga search_dirs
-for dir in "${NICY_SEARCH_DIRS[@]}"; do
-	[ -d "$dir" ] && search_dirs+=("$dir")
-done
-
-RUNTIMEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
-CACHEDIR="$RUNTIMEDIR/cache"
-mkdir -p "$CACHEDIR"
-CGROUPS="$CACHEDIR/cgroups"
-TYPES="$CACHEDIR/types"
-RULES="$CACHEDIR/rules"
-FILTER="$RUNTIMEDIR/filter"
-COMMANDS="$RUNTIMEDIR/commands"
-
 usage() { #{{{
-	cat <<-_EOF_
-	Usage:
-  $PROG [(-q|-v)|-n|-s] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}|-m] CMD [ARGS]…
+  cat <<_EOF_
+Usage:
+  $PROG [(-q|-v)|-n|-s] [-t TYPE|-d|-z] [-c CGROUP|--cpu{QUOTA}] [-u] [-m] CMD [ARGS]…
   $PROG --rebuild
   $PROG -k (rules|types|cgroups) [--from-dir=DIR]
 
-	Options:
+Options:
   -q, --quiet          Be quiet and suppress additional informational output.
   -v, --verbose        Be verbose and display which command is launched.
   -n, --dry-run        Display commands but do not run them.
@@ -80,422 +31,379 @@ usage() { #{{{
   -z, --cgroup-only    Like '--type=cgroup-only'. Unset all other properties.
 
   -c, --cgroup=CGROUP  Run the command as part of this existing CGROUP.
-      --cpu{QUOTA}     Like '--cgroup=cpu{QUOTA}' where QUOTA is a percentage
-                       relative to the total CPU time available on all cores.
-  -m, --managed        Run the command in a transient scope managed by a service
-                       manage whether a cgroup has been set or not.
-  -u, --force-cgroup   Run the command as part of the cgroup, if available, that
-                       matches a relevant property found in rule, if a cgroup
-                       has not been set yet.
+      --cpu{QUOTA}     Like '--cgroup=cpu{QUOTA}' where QUOTA is an integer that
+                       represents a percentage relative to the total CPU time
+                       available on all cores.
 
-      --rebuild        Rebuild the volatile cache and exit.
+  -m, --managed        Always run the command in a transient scope.
+  -u, --force-cgroup   Run the command as part of an existing cgroup, if any,
+                       that matches properties found, when no other cgroup has
+                       been set.
+
+      --rebuild        Rebuild the cache and exit.
 
   -k, --keys=KIND      List known KIND keys.
       --from-dir=DIR   Limit keys search to configuration files from DIR folder.
 
   -h, --help           Display this help and exit.
-	_EOF_
+_EOF_
 } #}}}
 
 error_exit() { #{{{
-	echo -e "${COLORR}$PROG: error: ${2:-'unknown error'}${RESET}" >&2
-	exit "${1:-1}"
+  echo -e "$PROG: error: ${2:-'unknown error'}" >&2
+  exit "${1:-1}"
 } #}}}
+
+# The user 's configuration files always get the highest priority.
+for dir in "/usr/local/etc" "/etc" "${XDG_CONFIG_HOME:-$HOME/.config}"; do
+  [ -f "$dir/$PROG/environment" ] && . "$dir/$PROG/environment"
+done
+
+[ ${#NICY_SEARCH_DIRS[@]} -eq 0 ] &&
+  NICY_SEARCH_DIRS=("$HOME/.config/$PROG" "/etc/$PROG" "/usr/local/etc/$PROG")
+
+[ -z "$NICY_DATADIR" -o ! -d "$NICY_DATADIR" ] &&
+  NICY_DATADIR="/usr/local/share/nicy"
+
+bool() { #{{{
+  [ $# -gt 0 ] || return 2
+  case "${1,,}" in
+    n | no | false | off | 0 | disabled | disabled | nouse) return 1 ;;
+    y | yes | true | on | 1 | enabled | enable | use) return 0 ;;
+  esac
+  return 1
+} #}}}
+
+true_or_false() { #{{{
+  bool "$1" &&
+    echo "true" ||
+    echo "false"
+} #}}}
+
+# Show what's going on
+if [ -n "$NICY_VERBOSE" ]; then
+  NICY_VERBOSE=$(true_or_false "$NICY_VERBOSE")
+else
+  NICY_VERBOSE=false
+fi
+
+QUIET=false
+VERBOSE=0
+bool "$NICY_VERBOSE" &&
+  VERBOSE=1
+USE_TYPE=auto
+USE_CGROUP=null
+FORCE_CGROUP=false
+ALWAYS_USE_SCOPE=false
+DRY_RUN=false
+LIST_KEYS=
+DIR_KEYS=
+
+SUBCMD=exec
+
+# # Optional hard-coded color management #{{{
+# COLORS=0
+# COLORG=
+# COLORR=
+# UNDERLINE=
+# RESET=
+# if [ -t 1 ] && bool $COLORS; then
+#   COLORR=$(tput setaf 1)
+#   COLORG=$(tput setaf 2)
+#   UNDERLINE=$(tput smul)
+#   RESET=$(tput sgr0)
+# fi #}}}
+
+declare -ga search_dirs
+for dir in "${NICY_SEARCH_DIRS[@]}"; do
+  [ -d "$dir" ] && search_dirs+=("$dir")
+done
+
+RUNTIMEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
+[ ! -d "$RUNTIMEDIR" ] && mkdir -p "$RUNTIMEDIR"
+CACHEDIR="${XDG_CACHE_HOME:-$HOME/.cache}/${PROG}"
+[ ! -d "$CACHEDIR" ] && mkdir -p "$CACHEDIR"
+
+CGROUPS="$CACHEDIR/cgroups"
+CPU_COUNT=$(nproc --all)
+TYPES="$CACHEDIR/types"
+RULES="$CACHEDIR/rules"
+DATABASE="$CACHEDIR/database"
+
+# FILTER="$RUNTIMEDIR/filter"
 
 # Functions
 
 JQ_PATH=$(command -v jq)
+jq() { $JQ_PATH -M "$@"; }
 
-jq() { $JQ_PATH -SMcr --from-file "$FILTER" "$@" ; }
+# quoted () { [ $# -gt 0 ] && echo "${@@Q}" ; }
 
-quoted () { [ $# -gt 0 ] && echo "${@@Q}" ; }
-
-# Checks whether this is or not a known cgroup
-has_cgroup() { grep -q -E -e '"cgroup":"'$1'"' "$CGROUPS" ; }
-has_cpuquota() { [ $# -eq 0 ] && return 1 || has_cgroup "cpu${1}" ; }
-
-# _kind() { kind=${1,,} ; printf '%s' "${kind%s}" ; }
 declare -Ag _keys=("cgroup" "cgroup" "rule" "name" "type" "type")
 
-list_files() { #{{{
-	[ $# -lt 2 ] && return 1
-	kind=${1,,}
-	kind=${kind%s}
-	shift
-	if [ "$kind" = "rule" ]; then
-		for confdir; do
-			[ ! -d "$confdir" ] && continue
-			find "$confdir" -mindepth 1 -maxdepth 1 -type d -print | \
-			sort -rg | while read -r dir; do
-				find $dir/ -mindepth 1 -type f -iname "*.rules" -print | sort -rg
-			done
-		done
-	elif [ "$kind" = "type" ] || [ "$kind" = "cgroup" ]; then
-		for confdir; do
-			[ ! -d "$confdir" ] && continue
-			find $confdir/ -mindepth 1 -maxdepth 1 -type f -iname "*.${kind}s" -print | \
-			sort -rg
-		done
-	fi
-} #}}}
-
 dump_content() { #{{{
-	[ $# -lt 2 ] && return 1
-	kind=${1,,}
-	kind=${kind%s}
-	shift
-	list_files "$kind" "$@" | xargs sed -s '/^[ ]*#/d; /^$/d'
+  [ $# -lt 2 ] && return 1
+  kind=${1,,}
+  kind=${kind%s}
+  [[ "$kind" =~ ^(cgroup|type|rule)$ ]] || return 2
+  shift
+  # list_files "$kind" "$@" | xargs sed -s '/^[ ]*#/d; /^$/d'
+  [ "$kind" = "rule" ] &&
+    depth="-mindepth 2" ||
+    depth="-maxdepth 1"
+  for confdir; do
+    [ -d "$confdir" ] || continue
+    find "${confdir}/" $depth -type f -iname "*.${kind}s" -print | sort -rn
+  done |
+    xargs sed -s '/^[ ]*#/d; /^$/d'
 } #}}}
 
-find_all()  { #{{{
-	[ $# -ne 1 ] && return 1
-	kind=${1,,}
-	kind=${kind%s}
-	dump_content "$kind" "${search_dirs[@]}"
+find_all() { #{{{
+  [ $# -ne 1 ] && return 1
+  kind=${1,,}
+  kind=${kind%s}
+  dump_content "$kind" "${search_dirs[@]}"
 } #}}}
 
-unique_by() { #{{{
-	[ $# -eq 0 ] && return 1
-	echo "unique_by(.$1) | .[] | .$1" >"$FILTER"
-	jq -s -
+# TODO: Read data from the cache, not from the configuration files.
+get_keys() { #{{{
+  [ $# -lt 2 ] && return 1
+  kind=${1,,}
+  kind=${kind%s}
+  key=${_keys[$kind]}
+  volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
+  shift
+  jqscript="unique_by(.${key}) | .[] | .${key}"
+  dump_content "$kind" "$@" | tee "$volatile" |
+    jq -sr "${jqscript}"
 } #}}}
 
-get_keys()  { #{{{
-	[ $# -lt 2 ] && return 1
-	kind=${1,,}
-	kind=${kind%s}
-	shift
-	dump_content "$kind" "$@" | unique_by "${_keys[$kind]}"
+make_json_cache() { #{{{
+  kind=$1
+  key=${_keys[$kind]}
+  volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
+  jqscript=$(printf 'include "nicy" ; make_cache("%s")' "${key}")
+  find_all "$kind" | tee "$volatile" |
+    jq -sc -L "$NICY_DATADIR" --argjson "nproc" "$CPU_COUNT" "$jqscript"
 } #}}}
 
-make_json_cache()  { #{{{
-	[ -z "$1" ] && return 1
-	kind=${1,,}
-	kind=${kind%s}
-	[[ "$kind" =~ (rule|type|cgroup) ]] || return 1
-	dest="$CACHEDIR/${kind}s"
-	if [ ! -f "$dest" ]; then
-		cat <<-_EOF_ >"$FILTER"
-		[.[] | $_DOWNCASE_FORMATTER | map_values(tostring)] |
-		unique_by(.${_keys[$kind]}) | .[]
-		_EOF_
-		find_all "$kind" | jq -s  >"$dest"
-	fi
+make_json_database() { #{{{
+  jqargs=()
+  pairs=($(printf '"%s":%s' "date" "$(date +"%s")"))
+  for kind in "cgroup" "type" "rule"; do
+    pairs+=($(printf '"%ss":$%ss' "$kind" "$kind"))
+    var="${kind^^}S"
+    jqargs+=(--slurpfile "${kind}s" "${!var}")
+  done
+  jqscript='{'"$( IFS=',' && echo "${pairs[*]}")"'}'
+  jq -n "${jqargs[@]}" "$jqscript" >"$DATABASE"
 } #}}}
 
-for kind in "type" "cgroup" "rule"; do
-	filter="def ${kind}(\$v):"
-	filter+=" \$${kind}s | first(.[] | select(.${_keys[$kind]} == \$v))? // {} ;"
-	declare -g _${kind^^}DEF="$filter"
-done
-for kind in "type" "cgroup"; do
-	filter='if has("'"$kind"'") then '"$kind"'(.'"$kind"') + . else . end'
-	declare -g _UPDATE_${kind^^}="$filter"
-done
-
-_TYPE_DEFAULT='type("default")'
-_TO_ENTRIES='to_entries|.[]'
-_FORMAT_ENTRIES='"\(.key) \(.value)"'
-_FORCE_CGROUP='if ($cgroup != "null") then . + cgroup($cgroup) else . end'
-_DOWNCASE_FORMATTER='with_entries(.key |= ascii_downcase)'
-_PARSE_FORMAT='%s=%s'
-
-parse_entry() { #{{{
-	key=$1
-	value=$2
-	case "${key,,}" in #{{{
-		cgroup)
-			# TODO: Cgroups values should be checked when parsing command-line
-			# options (mostly done) and when updating the configuration files.
-			# Add a switch to nicy command to parse and validate them.
-			has_cgroup "$value" || false ;;
-		name | type)
-			return ;;
-		cpuquota) # percent, range 1..99
-			# This property either belongs to some cgroup definition, either will
-			# be applied through the transient scope.
-			percent=${value%\%}
-			([[ $percent -ge 1 ]] && [[ $percent -le 99 ]]) &&
-				value="${percent}%" || false ;;
-		sched) # other, batch, idle, fifo or rr (man 2 sched_setscheduler)
-			[[ "$value" =~ ^(other|fifo|rr|batch|idle)$ ]] || false ;;
-		rtprio) # range 1..99 (man 2 sched_setscheduler)
-			[[ $value -ge 1 ]] && [[ $value -le 99 ]] || false ;;
-		nice) # range -20..19 (man 2 setpriority)
-			[[ $value -ge -20 ]] && [[ $value -le 19 ]] || false ;;
-		ioclass) # none, realtime, best-effort or idle (man 2 ioprio_set)
-			[[ "$value" =~ ^(none|realtime|best-effort|idle)$ ]] || false ;;
-		ionice) # range 0..7 (man 2 ioprio_set)
-			[[ $value -ge 0 ]] && [[ $value -le 7 ]] || false ;;
-		oom_score_adj) # range -1000..1000
-			[[ $value -ge -1000 ]] && [[ $value -le 1000 ]] || false ;;
-		# Some more options from man 5 systemd.resource-control
-		ioweight) # range 1..10000
-			[[ $value -ge -1 ]] && [[ $value -le 10000 ]] || false ;;
-		memoryhigh|memorymax) # bytes (K, M, G and T suffix), percent or infinity
-			case "$value" in
-				infinity) : ;;
-				?([0-9])[0-9]?(%))
-					[[ ${value%\%} -ne 0 ]] && value="${value%\%}%" || false ;;
-				+([0-9])?(K|M|G|T))
-					[[ ${value%[^[:digit:]]} -ne 0 ]] || false ;;
-				*) false ;;
-			esac ;;
-		# Prepend some command arguments
-		cmdargs)
-			# TODO: Parse here
-			value="'$value'" ;;
-		*)
-			error_exit 1 "unknown key $key. Aborting" ;;
-	esac || error_exit 1 "bad $key value '$value'."
-	#}}}
-	case "${key,,}" in
-		cpuquota) key="CPUQuota" ;;
-		ioweight) key="IOWeight" ;;
-		memoryhigh) key="MemoryHigh" ;;
-		memorymax) key="MemoryMax" ;;
-	esac
-	printf "${_PARSE_FORMAT}\n" "$key" "$value"
+check_or_build_cache() { #{{{
+  # TODO: Provide environment variable to always rebuild cache
+  do_rebuild=${1:-no}
+  for kind in "cgroup" "type" "rule"; do
+    var="${kind^^}S"
+    dest=${!var}
+    if [ ! -f "$dest" ] || bool $do_rebuild; then
+      make_json_cache "$kind" >"$dest"
+    fi
+  done
+  if [ ! -f "$DATABASE" ] || bool $do_rebuild; then
+    make_json_database
+  fi
 } #}}}
 
-set_my_env() { #{{{
-	[[ $# -ge 2 ]] || return 0
-	key=$1
-	value=$2
-	case "${key,,}" in
-		cgroup) echo "USE_CGROUP=$value" ;;
-		nice) echo "my_niceness=$value" ;;
-		cpuquota | sched | rtprio | ioclass | ionice | oom_score_adj | \
-			ioweight | memoryhigh|memorymax)
-			echo "my_${key,,}=$value" ;;
-		cmdargs)
-			echo "my_cmdargs='$value'" ;;
-		name | type)
-			return ;;
-		*)
-			error_exit 1 "unknown key $key. Aborting" ;;
-	esac
+find_which_cmd() { #{{{
+  name=$(basename "$1")
+  # Strip suffix, if any
+  name=${name%.nicy}
+  # Set an absolute path for the final command, trying to prevent loops (for
+  # instance, with nested nicy invocations).
+  pattern="${HOME}/.*nicy.*" # Match default home path set by some nicy helper
+  # Not valid absolute path
+  if [ "$1" = "$name" ] ||
+    [[ "$(readlink -f $(which "$cmd"))" =~ $pattern ]]; then
+    for path in $(which -a "$name"); do
+      # Skip path that contains "nicy"
+      [[ "$path" =~ $pattern ]] && continue
+      cmd=$path
+      break
+    done
+  else
+    cmd=$1
+  fi
+  echo "$cmd"
 } #}}}
 
-check_or_build_cache () { #{{{
-	for item in "rule" "type" "cgroup"; do
-		make_json_cache "$item"
-	done
+jsonify() { #{{{
+  case "$1" in
+    [0-9]* | true | false | null) echo "$1" ;;
+    *) echo '"'"$1"'"' ;;
+  esac
 } #}}}
 
-set_filter()  { #{{{
-	case "$1" in
-		auto) filter='rule($name)' ;;
-		default) filter="$_TYPE_DEFAULT" ;;
-		cgroup-only) filter="{}" ;;
-		*) filter='type($type) // {}';;
-	esac
-	cat <<-EOF
-	$_TYPEDEF
-	$_CGROUPDEF
-	${_RULEDEF//\{\}/$_TYPE_DEFAULT}
-	$filter |
-	$_UPDATE_TYPE |
-	$_UPDATE_CGROUP |
-	$_FORCE_CGROUP |
-	del(.name, .type)|$_TO_ENTRIES|$_FORMAT_ENTRIES
-	EOF
+TEMPLATE='{
+  "name": "%s",
+  "which_cmd": "%s",
+  "option": "%s",
+  "use_cgroup": %s,
+  "find_matching": %s,
+  "use_scope": %s,
+  "quiet": %s,
+  "verbose": %d,
+  "nproc": %d,
+  "schedtool": "%s",
+  "ionice": "%s"
+}'
+
+build_request() { #{{{
+  cmd=$(find_which_cmd "$1")
+  printf "$TEMPLATE" \
+    "$(basename "$cmd")" \
+    "$cmd" \
+    "${USE_TYPE}" \
+    $(jsonify ${USE_CGROUP}) \
+    ${FORCE_CGROUP} \
+    ${ALWAYS_USE_SCOPE} \
+    ${QUIET} \
+    ${VERBOSE} \
+    $CPU_COUNT \
+    "$(LANG=C schedtool $$)" \
+    "$(LANG=C ionice -p $$)"
 } #}}}
 
-get_entries()  { #{{{
-	set_filter "$USE_TYPE" >"$FILTER"
-	jqargs=(--null-input --arg name "$1"
-		--arg cgroup "$USE_CGROUP" --arg type "$USE_TYPE"
-		--slurpfile rules "$RULES"
-		--slurpfile types "$TYPES"
-		--slurpfile cgroups "$CGROUPS")
-	eval declare -A entries=($(jq "${jqargs[@]}"))
-	for key in "${!entries[@]}"; do
-		parse_entry "${key}" "${entries[$key]}"
-	done | tee "$RUNTIMEDIR/${FUNCNAME[0]}"
-} #}}}
-
-set_properties () { # {{{
-	[ $# -ne 1 ] && return 1
-	eval declare -A properties=($(_PARSE_FORMAT='%s %s'; get_entries "$1"))
-	for key in "${!properties[@]}"; do
-		set_my_env "$key" "${properties[$key]}"
-	done | tee "$RUNTIMEDIR/${FUNCNAME[0]}"
+COMMANDS="$RUNTIMEDIR/commands"
+get_commands() { #{{{
+  volatile="$COMMANDS"
+  jqscript='include "nicy" ; main'
+  jq -r -L "$NICY_DATADIR" "$jqscript" \
+    --argjson request "$(build_request "$1")" \
+    "$DATABASE" |& tee "$volatile"
 } #}}}
 
 # Parse options
 OPTIND=1
 while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
-	case $option in
-		-)
-			case "$OPTARG" in
-				help) SUBCMD=usage ; break ;;
-				rebuild) SUBCMD=rebuild ; break ;;
-				dry-run) DRY_RUN=y ;;
-				quiet) QUIET=y ;;
-				verbose) VERBOSE=$(( $VERBOSE + 1 )) ;;
-				type=*) # Accepts auto, default, cgroup-only or any known type
-					value=${OPTARG#type=}
-					value=${value,,}
-					if [[ "$value" =~ (auto|default|cgroup-only) ]]; then
-						USE_TYPE="$value"
-					else
-						case "$(get_keys "types" "${search_dirs[@]}")" in
-							*"$value"*) USE_TYPE="$value" ;;
-							*) error_exit 1 "not valid type value '$value'." ;;
-						esac
-					fi
-					;;
-				cgroup=*)
-					value=${OPTARG#cgroup=}
-					value=${value,,}
-					make_json_cache "cgroup"
-					has_cgroup "$value" &&
-						USE_CGROUP="$value" ||
-						error_exit 1 "not valid cgroup value '$value'."
-					;;
-				default) USE_TYPE="default" ;;
-				cgroup-only) USE_TYPE="cgroup-only" ;;
-				managed) ALWAYS_USE_SCOPE=y ;;
-				force-cgroup) FORCE_CGROUP=y ;;
-				cpu*)
-					make_json_cache "cgroup"
-					has_cgroup "$OPTARG" &&
-						USE_CGROUP="$OPTARG" ||
-						error_exit 1 "unknown option '--$OPTARG'."
-					;;
-				build-script) SUBCMD=show-script ;;
-				keys=*)
-					kind=${OPTARG#keys=}
-					kind=${kind,,}
-					kind=${kind%s}
-					case "$kind" in
-						rule|type|cgroup)
-							SUBCMD=list
-							LIST_KEYS=$kind
-							;;
-						*) error_exit 1 "not valid keys value '${OPTARG##*=}'.";;
-					esac
-					;;
-				from-dir=*)
-					[ -z "$LIST_KEYS" ] &&
-						error_exit 1 "missing required '--keys' option"
-					dir=${OPTARG#from-dir=}
-					dir=$(eval echo "$dir")
-					[ -d "$dir" ] &&
-						DIR_KEYS=$dir ||
-						error_exit 1 "no such directory '$dir'"
-					;;
-				-) break ;;
-				*) error_exit 1 "unknown option '$OPTARG'." ;;
-			esac
-		;;
-		h)
-			usage
-			exit 0
-			;;
-		s) SUBCMD=show-script ;;
-		n) DRY_RUN=y ;;
-		q) QUIET=y ;;
-		v) VERBOSE=$(( $VERBOSE + 1 )) ;;
-		m) ALWAYS_USE_SCOPE=y ;;
-		u) FORCE_CGROUP=y ;;
-		t) # Accepts auto, default, cgroup-only or any known type
-			case "$OPTARG" in
-				auto|default|cgroup-only) USE_TYPE="$OPTARG" ;;
-				# TODO: Check that type is valid
-				*) USE_TYPE="$OPTARG" ;;
-			esac
-			;;
-		c)
-			make_json_cache "cgroup"
-			has_cgroup "$OPTARG" &&
-				USE_CGROUP="$OPTARG" ||
-				error_exit 1 "not valid cgroup value '$OPTARG'."
-			;;
-		d) USE_TYPE="default" ;;
-		z) USE_TYPE="cgroup-only" ;;
-		k)
-			kind=${OPTARG,,}
-			kind=${kind%s}
-			case "$kind" in
-				rule|type|cgroup)
-					SUBCMD=list
-					LIST_KEYS=$kind
-					;;
-				*) error_exit 1 "not valid keys value '${OPTARG}'.";;
-			esac
-			;;
-		\?) error_exit 1 "unknown option '$OPTARG'." ;;
-		:) error_exit 1 "missing argument for option '$OPTARG'." ;;
-	esac
+  case $option in
+    -)
+      case "$OPTARG" in
+        help)
+          SUBCMD=usage
+          break
+          ;;
+        rebuild)
+          SUBCMD=rebuild
+          break
+          ;;
+        dry-run) DRY_RUN=true ;;
+        quiet) QUIET=true ;;
+        verbose) VERBOSE=$(($VERBOSE + 1))   ;;
+        type=*) # Accepts auto, default, cgroup-only or any known type
+          value=${OPTARG#type=}
+          [[ "${value,,}" =~ (auto|default|cgroup-only) ]] &&
+            USE_TYPE="${value,,}" ||
+            USE_TYPE="$value"
+          ;;
+        cgroup=*) USE_CGROUP="${OPTARG#cgroup=}" ;;
+        default) USE_TYPE="default" ;;
+        cgroup-only) USE_TYPE="cgroup-only" ;;
+        managed) ALWAYS_USE_SCOPE=true ;;
+        force-cgroup) FORCE_CGROUP=true ;;
+        cpu*) USE_CGROUP="$OPTARG" ;;
+        build-script) SUBCMD=show-script ;;
+        keys=*)
+          kind=${OPTARG#keys=}
+          kind=${kind,,}
+          kind=${kind%s}
+          case "$kind" in
+            rule | type | cgroup)
+              SUBCMD=list
+              LIST_KEYS=$kind
+              ;;
+            *) error_exit 1 "not valid keys value '${OPTARG##*=}'." ;;
+          esac
+          ;;
+        from-dir=*)
+          [ -z "$LIST_KEYS" ] &&
+            error_exit 1 "missing required '--keys' option"
+          dir=${OPTARG#from-dir=}
+          dir=$(eval echo "$dir")
+          [ -d "$dir" ] &&
+            DIR_KEYS=$dir ||
+            error_exit 1 "no such directory '$dir'"
+          ;;
+        -) break ;;
+        *) error_exit 1 "unknown option '$OPTARG'." ;;
+      esac
+      ;;
+    h)
+      usage
+      exit 0
+      ;;
+    s) SUBCMD=show-script ;;
+    n) DRY_RUN=true ;;
+    q) QUIET=true ;;
+    v) VERBOSE=$(($VERBOSE + 1))   ;;
+    m) ALWAYS_USE_SCOPE=true ;;
+    u) FORCE_CGROUP=true ;;
+    t) # Accepts auto, default, cgroup-only or any known type
+      value=$OPTARG
+      [[ "${value,,}" =~ (auto|default|cgroup-only) ]] &&
+        USE_TYPE="${value,,}" ||
+        USE_TYPE="$value"
+      ;;
+    c) USE_CGROUP="$OPTARG" ;;
+    d) USE_TYPE="default" ;;
+    z) USE_TYPE="cgroup-only" ;;
+    k)
+      kind=${OPTARG,,}
+      kind=${kind%s}
+      case "$kind" in
+        rule | type | cgroup)
+          SUBCMD=list
+          LIST_KEYS=$kind
+          ;;
+        *) error_exit 1 "not valid keys value '${OPTARG}'." ;;
+      esac
+      ;;
+    \?) error_exit 1 "unknown option '$OPTARG'." ;;
+    :) error_exit 1 "missing argument for option '$OPTARG'." ;;
+  esac
 done #}}}
 shift $(($OPTIND - 1))
 
-case "$SUBCMD" in
-	usage)
-		usage
-		exit 0
-		;;
-	list)
-		[ -z "$DIR_KEYS" ] &&
-			get_keys "$LIST_KEYS" "${search_dirs[@]}" ||
-			get_keys "$LIST_KEYS" "$DIR_KEYS"
-		exit 0
-		;;
-	rebuild)
-		(cd $CACHEDIR && rm -f rules types cgroups)
-		check_or_build_cache
-		exit $?
-		;;
-	*)
-		[ $# -lt 1 ] &&
-			usage &&
-			exit 1
-		;;
-esac
+case "$SUBCMD" in #{{{
+  usage)
+    usage
+    exit 0
+    ;;
+  list)
+    [ -z "$DIR_KEYS" ] &&
+      get_keys "$LIST_KEYS" "${search_dirs[@]}" ||
+      get_keys "$LIST_KEYS" "$DIR_KEYS"
+    exit 0
+    ;;
+  rebuild)
+    (cd $CACHEDIR && rm -f rules types cgroups)
+    check_or_build_cache "yes"
+    exit $?
+    ;;
+  *)
+    [ $# -lt 1 ] &&
+      usage &&
+      exit 1
+    ;;
+esac #}}}
 
-unset my_quiet
-([ "$QUIET" = "y" ] || [ $VERBOSE -lt 2 ]) &&
-my_quiet="--quiet"
-[ "$QUIET" = "y" ] &&
-	VERBOSE=0
+which "$1" &>/dev/null ||
+  error_exit 1 "$1 not found"
 
-my_name=$(basename "$1")
-
-# Prevent nasty loops if using nested nicy commands
-pattern="${HOME}/.*nicy.*"
-realpath=$(which "$1")
-[ -z "$realpath" ] &&
-	error_exit 1 "$1 not found"
-realpath=$(readlink -f "$realpath")
-if [ "$1" = "$my_name" ] || [[ "$realpath" =~ $pattern ]]; then
-	# Strip suffix if any
-	my_name=${my_name%.nicy}
-	for realpath in $(which -a "$my_name"); do
-		# Skip path that contains "nicy"
-		[[ "$realpath" =~ $pattern ]] && continue
-		cmdpath=$realpath
-		break
-	done
-else
-	cmdpath="$1"
-fi
-[ -z "$cmdpath" ] &&
-	error_exit 1 "$1 not found" ||
-	shift
-
-# Command passed to `exec`, if no scope is required, or to `systemd-run`
-declare -ga my_exec_cmd=("$cmdpath")
+cmd=$1
+shift
 
 # Save the command arguments, if any, for later
 declare -ga my_args=("$@")
-
-# Properties
-declare -g my_cpuquota my_sched my_rtprio my_niceness \
-	my_ioclass my_ionice my_ioweight \
-	my_oomscoreadjust my_memoryhigh my_memorymax \
-	my_cmdargs
 
 # TODO: Lock the runtime dir
 
@@ -503,236 +411,62 @@ declare -g my_cpuquota my_sched my_rtprio my_niceness \
 find "${RUNTIMEDIR}/" -mindepth 1 -maxdepth 1 -type f -delete
 check_or_build_cache
 
-# Populate
-eval $(set_properties "$my_name")
+set +o errexit
+# Get commands
+get_commands "$cmd" >/dev/null
+ret=$?
+if [ "$ret" -ne 0 ]; then
+  error_exit "$ret" "$(<"$COMMANDS")"
+fi
+mapfile -t commands <"$COMMANDS"
 
-# Check if running the command in a scope is required
-# Cgroups without properties can be set, so test also USE_CGROUP
-SCOPE_REQUIRED=n
-if [ "$USE_CGROUP" != "null" ] || [ "$ALWAYS_USE_SCOPE" = "y" ] ||
-	[ -v my_cpuquota ] || [ -v my_ioweight ] ||
-	[ -v my_memoryhigh ] || [ -v my_memorymax ]; then
-	SCOPE_REQUIRED=y
+if [ "${commands[0]}" != "commands" ]; then
+  error_exit 1
 fi
 
-apply_renice () { #{{{
-	if [ -v my_niceness ]; then
-		# range -20..19 (man 1 renice)
-		quoted ulimit -S -e "$((20 - $my_niceness))"
-		[ "$SCOPE_REQUIRED" = "n" ] &&
-			quoted renice -n "$my_niceness" "\$$"
-	fi
-} #}}}
-
-apply_oomscore () { #{{{
-	if [ -v my_oomscoreadjust ]; then
-		# range -1000..1000 (man 1 choom)
-		cmd=("choom" "-n" "$my_oomscoreadjust")
-		if [ "$SCOPE_REQUIRED" = "n" ]; then
-			quoted "${cmd[@]}" -p "\$$"
-		else
-			my_exec_cmd=("${cmd[@]}" "--" "${my_exec_cmd[@]}")
-		fi
-	fi
-} #}}}
-
-apply_schedtool () { #{{{
-	sched_args=()
-	if [ -v my_sched ]; then #{{{
-		case "$my_sched" in # man 8 schedtool
-			other) sched_args+=("-N") ;;
-			fifo) sched_args+=("-F") ;;
-			rr) sched_args+=("-R") ;;
-			batch) sched_args+=("-B") ;;
-			idle) sched_args+=("-D") ;;
-		esac
-	fi
-	if [ -v my_rtprio ]; then
-		if [ "$my_sched" = "fifo" ] || [ "$my_sched" = "rr" ] ||
-			[[ "$(schedtool $$)" =~ '.* POLICY (F|R):.*' ]]; then
-			sched_args+=("-p" "$my_prio")
-		fi
-	fi #}}}
-	if [[ ${#sched_args[@]} -gt 0 ]]; then
-		cmd=("schedtool" "${sched_args[@]}")
-		if [ "$SCOPE_REQUIRED" = "n" ]; then
-			quoted "${cmd[@]}" "\$$"
-		else
-			my_exec_cmd=("${cmd[@]}" "-e" "${my_exec_cmd[@]}")
-		fi
-	fi
-} #}}}
-
-apply_ionice () { #{{{
-	ionice_args=()
-	if [ -v my_ioclass ]; then #{{{
-		case "$my_ioclass" in # man 1 ionice
-			none) ionice_args+=("-c" "0") ;;
-			realtime) ionice_args+=("-c" "1") ;;
-			best-effort) ionice_args+=("-c" "2") ;;
-			idle) ionice_args+=("-c" "3") ;;
-		esac
-	fi
-	if [ -v my_ionice ]; then
-		if [ "$my_ioclass" = "realtime" ] || [ "$my_ioclass" = "best-effort" ] ||
-		[[ "$(LANG=C ionice -p $$)" =~ ^(realtime|best-effort): ]]; then
-			ionice_args+=("-n" "$my_ionice")
-		fi
-	fi #}}}
-	if [[ ${#ionice_args[@]} -gt 0 ]]; then
-		cmd=("ionice" "-t" "${ionice_args[@]}")
-		if [ "$SCOPE_REQUIRED" = "n" ]; then
-			quoted "${cmd[@]}" "-p" "\$$"
-		else
-			my_exec_cmd=("${cmd[@]}" "${my_exec_cmd[@]}")
-		fi
-	fi
-} #}}}
-
-build_cgroup_from_vars() { #{{{
-	declare -A vars=(mycpuquota CPUQuota my_memoryhigh MemoryHigh
-		my_memorymax MemoryMax my_ioweight IOWeight)
-	content=
-	for name in "${!vars[@]}"; do
-		if eval [ -v $name ]; then
-			[ -z "$content" ] &&
-				content=$(printf '"%s": "%s"' "${vars[$name]}" "${!name}") ||
-				content+=$(printf ', "%s": "%s"' "${vars[$name]}" "${!name}")
-		fi
-	done
-	[ -n "$content" ] &&
-		printf '{ %s }' "$content" ||
-		printf "{}"
-} #}}}
-
-find_best_matching_cgroup() { #{{{
-	cat <<-_EOF_ >"$FILTER"
-	[
-		\$cgroups | .[] |
-		if (del(.cgroup) | inside(\$object | $_DOWNCASE_FORMATTER))
-		then .
-		else empty
-		end
-	] | sort_by(length) | reverse | first(.[] | .cgroup)?
-	_EOF_
-	jqargs=(--null-input --argjson object "$1"
-		--slurpfile cgroups "$CGROUPS")
-	jq "${jqargs[@]}" | tee "$RUNTIMEDIR/${FUNCNAME[0]}"
-} #}}}
-
-_get_parsed_entries()  { #{{{
-	kind=${FUNCNAME[1]}
-	kind=${kind%_entries}
-	cat <<-_EOF_ >"$FILTER"
-	$(eval echo "\$_${kind^^}DEF")
-	${kind}(\$${_keys[$kind]}) | del(.${_keys[$kind]}) |
-	$_TO_ENTRIES | $_FORMAT_ENTRIES
-	_EOF_
-	jqargs=(--null-input --arg "${_keys[$kind]}" "$1"
-		--slurpfile "${kind}s" "$CACHEDIR/${kind}s")
-	eval declare -A entries=($(jq "${jqargs[@]}"))
-	for key in "${!entries[@]}"; do
-		parse_entry "${key}" "${entries[$key]}"
-	done | tee "$RUNTIMEDIR/${FUNCNAME[1]}"
-} #}}}
-
-cgroup_entries() { _get_parsed_entries "$1" ; }
-type_entries() { _get_parsed_entries "$1" ; }
-rule_entries() { _get_parsed_entries "$1" ; }
-
-[ $UID -ne 0 ] &&
-	USER_OR_NOT="--user" ||
-	USER_OR_NOT=
-
-complete_cmd () { #{{{
-	if [ "$SCOPE_REQUIRED" = "y" ]; then
-		# No authentication for privileged operations.
-		quoted 'USER_OR_NOT=$([ $UID -ne 0 ] && echo "--user")'
-		cmd=(exec systemd-run -G -d "$my_quiet" --no-ask-password \$USER_OR_NOT
-			"--unit=$(basename "$my_name")-\$$" --scope)
-
-		if [ "$USE_CGROUP" = "null" ] && [ "$FORCE_CGROUP" = "y" ]; then #{{{
-			# Build json object
-			json=$(build_cgroup_from_vars)
-			if [ -n "$json" ]; then
-				# Find matching
-				cgroup=$(find_best_matching_cgroup "$json")
-				[ -n "$cgroup" ] && USE_CGROUP=$cgroup
-			fi
-		fi #}}}
-
-		if [ "$USE_CGROUP" != "null" ]; then #{{{
-			# Start cgroup slice
-			slice="${PROG}-${USE_CGROUP}.slice"
-			quoted systemctl "\$USER_OR_NOT" start "$slice"
-			# Read cgroup properties and set them up
-			properties=($(cgroup_entries "$USE_CGROUP"))
-			quoted systemctl "\$USER_OR_NOT" --runtime set-property "$slice" "${properties[@]}"
-			# Unset local variables
-			for item in "${properties[@]}"; do
-				name=${item%=*}
-				name="my_${name,,}"
-				eval unset $name
-			done
-			cmd+=("--slice=$slice")
-		fi #}}}
-
-		# Finally, add remaining properties to scope
-		# In nicy, the quota value as a percentage of total CPU time for ALL cores
-		[ -v my_cpuquota ] &&
-			cmd+=("-p" "CPUQuota=$(( $(nproc --all) * $my_cpuquota ))%")
-		[ -v my_ioweight ] &&
-			cmd+=("-p" "IOWeight=$my_ioweight")
-		[ -v my_memoryhigh ] &&
-			cmd+=("-p" "MemoryHigh=$my_memoryhigh")
-		[ -v my_memorymax ] &&
-			cmd+=("-p" "MemoryMax=$my_memorymax")
-		[ -v my_niceness ] &&
-			cmd+=("--nice=$my_niceness")
-	else
-		cmd=("exec")
-	fi
-	if [ -v my_cmdargs ]; then
-		mapfile -t args <<<"$(echo ${my_cmdargs:1:-1} |tr "," "\n")"
-		my_exec_cmd+=("${args[@]}")
-	fi
-	quoted "${cmd[@]}" "${my_exec_cmd[@]}"
-} #}}}
-
-[ -f "$COMMANDS" ] && rm -f "$COMMANDS"
-exec 3<> "$COMMANDS"
-apply_renice >&3
-apply_oomscore >&3
-apply_schedtool >&3
-apply_ionice >&3
-complete_cmd >&3
-exec 3>&-
-mapfile -t commands <"$COMMANDS"
+unset commands[0]
 
 # TODO: Unlock the runtime dir
 
 if [ "$SUBCMD" = "show-script" ]; then
-	echo "#!/bin/bash"
-	for cmdline in "${commands[@]}"; do
-		eval set -- $cmdline
-		[ "$1" = "exec" ] &&
-			echo "$*" '"$@"' ||
-			echo "$*"
-	done
-	exit 0
+  echo "#!/bin/bash"
+  for cmdline in "${commands[@]}"; do
+    eval set -- $cmdline
+    [[ "$*" =~ ^exec.* ]] &&
+      echo "$*" '"$@"' ||
+      echo "$*"
+  done
+  exit 0
 fi
 
+bool $QUIET &&
+  VERBOSE=0
+
+if [ $UID -ne 0 ]; then
+  user_or_system=--user
+  sed_script='s/ ${user_or_system}/ --user/;'
+else
+  user_or_system=
+  sed_script='s/ ${user_or_system}//;'
+fi
+sed_script+=' s/\$\$/'"$$"'/; s/ &>\/dev\/null//'
+
 for cmdline in "${commands[@]}"; do
-	[ -z "$cmdline" ] &&
-		continue
-	eval set -- $cmdline
-	cmd=("$@")
-	[ "$1" = "exec" ] &&
-		cmd+=("${my_args[@]}")
-	([ $VERBOSE -ge 1 ] || [ "$DRY_RUN" = "y" ]) &&
-		eval echo -e "${COLORG}${PROG}:${cmd[@]}${RESET}" >&2
-	[ "$DRY_RUN" = "y" ] &&
-		continue
-	eval "${cmd[@]}"
+  [ -z "$cmdline" ] &&
+    continue
+  eval set -- $cmdline
+  [[ "$*" =~ ^\[.* ]] &&
+    continue
+  cmd=($*)
+  [[ "$*" =~ ^exec.* ]] &&
+    cmd+=("${my_args[@]}")
+  if [ $VERBOSE -ge 1 ] || bool $DRY_RUN; then
+    msg="${PROG}: ${cmd[@]}"
+    sed "$sed_script" <<<"$msg" >&2
+  fi
+  bool $DRY_RUN &&
+    continue
+  eval "${cmd[@]}"
 done
 
+exit 0

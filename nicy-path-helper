@@ -4,7 +4,7 @@
 PROG="$(basename "$0")"
 
 # Goodbye root !
-[ $(id -u) -eq 0 ] && exit 1
+[ $UID -eq 0 ] && exit 1
 
 # The environment variables must be set
 if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/nicy/environment" ]; then
@@ -12,7 +12,7 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/nicy/environment" ]; then
 else
   exit 1
 fi
-[ -z "$NICY_SEARCH_DIRS" ] && exit 1
+[ -v $NICY_SEARCH_DIRS ] || exit 1
 
 # Must be first first in PATH {{{
 NICY_BIN_DIR="$HOME/bin/nicy"
@@ -51,8 +51,7 @@ done
 #}}}
 
 # Create links for all the rules provided by the user (found in home) {{{
-declare -ga search_dirs
-mapfile -d ":" -t search_dirs <<<"$NICY_SEARCH_DIRS"
+declare -ga search_dirs=("${NICY_SEARCH_DIRS[@]}")
 pattern="^$HOME"'/.*'
 for confdir in "${search_dirs[@]}"; do
 	[[ "$confdir" =~ $pattern ]] || continue
