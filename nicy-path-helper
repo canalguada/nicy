@@ -1,10 +1,10 @@
 #!/bin/bash
-# vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 noet:
+# vim: set ft=sh fdm=marker ai ts=2 sw=2 tw=79 et:
 
 PROG="$(basename "$0")"
 
 # Goodbye root !
-[ $UID -eq 0 ] && exit 1
+[ $UID -eq 0 ] && exit 4
 
 # The environment variables must be set
 if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/nicy/environment" ]; then
@@ -12,13 +12,17 @@ if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/nicy/environment" ]; then
 else
   exit 1
 fi
-[ -v $NICY_SEARCH_DIRS ] || exit 1
+[ ${#NICY_SEARCH_DIRS[@]} -gt 0 ] || exit 2
 
-# Must be first first in PATH {{{
+# Create if required and remove from PATH {{{
 NICY_BIN_DIR="$HOME/bin/nicy"
 [ -d "$NICY_BIN_DIR" ] ||
   mkdir -p "$NICY_BIN_DIR"
-export PATH="$NICY_BIN_DIR:$PATH"
+case ":${PATH}:" in
+  *":$NICY_BIN_DIR:"*)
+    export PATH=${PATH//$(sed 's/\//\\\//g' <<<"$NICY_BIN_DIR"):/} ;;
+  *) ;;
+esac
 #}}}
 
 # Delete nicy scripts but preserve all links {{{
@@ -26,14 +30,17 @@ find "${NICY_BIN_DIR}/" -type f -iname "*.nicy" -delete
 #}}}
 
 dump_rules () { #{{{
-	# ignore file tracks the rules to skip, not adding a nicy script for the
-	# commands listed
+  # ignore file tracks the rules to skip, not adding a nicy script for the
+  # commands listed
   rc_ignore="${XDG_CONFIG_HOME:-$HOME/.config}/nicy/ignore"
-  if [ -f "$rc_ignore" ]; then
-		nicy -k "rules" | sort | comm -13 "$rc_ignore" -
-	else
-    nicy -k "rules" | sort
-	fi
+  nicy -k "rules" | awk '{print $1}' | sort |
+    {
+      if [ -f "$rc_ignore" ]; then
+        comm -13 "$rc_ignore" -
+      else
+        cat -
+      fi
+    }
 }
 #}}}
 
@@ -42,28 +49,25 @@ nicy --rebuild
 # Create nicy script for all the rules matching an available command {{{
 dump_rules | while read -r name; do
   name_path=$(command -v "$name")
-	[ -z  "$name_path" ] && continue
-	cur_path="${NICY_BIN_DIR}/${name}.nicy"
-	nicy -s -q $name_path >"$cur_path"
-	chmod +x "$cur_path"
-	sleep 0.2
+  [ -z  "$name_path" ] && continue
+  cur_path="${NICY_BIN_DIR}/${name}.nicy"
+  nicy -s -q $name_path >"$cur_path"
+  chmod +x "$cur_path"
+  sleep 2
 done
 #}}}
 
-# Create links for all the rules provided by the user (found in home) {{{
-declare -ga search_dirs=("${NICY_SEARCH_DIRS[@]}")
-pattern="^$HOME"'/.*'
-for confdir in "${search_dirs[@]}"; do
-	[[ "$confdir" =~ $pattern ]] || continue
-	(
-		cd "${NICY_BIN_DIR}"
-		nicy -k "rules" "--from-dir=$confdir" |
-			while read -r name; do
-				[ ! -f "${name}.nicy" ] && continue
-				ln -sf -T "${name}.nicy" "${name}"
-			done
-	)
-done
+# # Create links for all the command names provided by the user {{{
+rc_symlink="${XDG_CONFIG_HOME:-$HOME/.config}/nicy/symlink"
+if [ -f "$rc_symlink" ]; then
+  (
+  cd "${NICY_BIN_DIR}"
+  while read -r name; do
+    [ ! -f "${name}.nicy" ] && rm -f "$name" && continue
+    ln -sf -T "${name}.nicy" "$name"
+  done <"$rc_symlink"
+  )
+fi
 #}}}
 
 exit 0

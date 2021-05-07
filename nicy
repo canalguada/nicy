@@ -101,22 +101,9 @@ DIR_KEYS=
 
 SUBCMD=exec
 
-# # Optional hard-coded color management #{{{
-# COLORS=0
-# COLORG=
-# COLORR=
-# UNDERLINE=
-# RESET=
-# if [ -t 1 ] && bool $COLORS; then
-#   COLORR=$(tput setaf 1)
-#   COLORG=$(tput setaf 2)
-#   UNDERLINE=$(tput smul)
-#   RESET=$(tput sgr0)
-# fi #}}}
-
 declare -ga search_dirs
 for dir in "${NICY_SEARCH_DIRS[@]}"; do
-  [ -d "$dir" ] && search_dirs+=("$dir")
+  [ -d "$dir" ] && search_dirs+=($(realpath "$dir"))
 done
 
 RUNTIMEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
@@ -130,61 +117,55 @@ TYPES="$CACHEDIR/types"
 RULES="$CACHEDIR/rules"
 DATABASE="$CACHEDIR/database"
 
-# FILTER="$RUNTIMEDIR/filter"
 
 # Functions
 
 JQ_PATH=$(command -v jq)
 jq() { $JQ_PATH -M "$@"; }
 
-# quoted () { [ $# -gt 0 ] && echo "${@@Q}" ; }
-
-declare -Ag _keys=("cgroup" "cgroup" "rule" "name" "type" "type")
-
 dump_content() { #{{{
   [ $# -lt 2 ] && return 1
   kind=${1,,}
   kind=${kind%s}
   [[ "$kind" =~ ^(cgroup|type|rule)$ ]] || return 2
-  shift
-  # list_files "$kind" "$@" | xargs sed -s '/^[ ]*#/d; /^$/d'
-  [ "$kind" = "rule" ] &&
-    depth="-mindepth 2" ||
+  if [ "$kind" = "rule" ]; then
+    depth="-mindepth 2"
+    key="name"
+  else
     depth="-maxdepth 1"
+    key=$kind
+  fi
+  shift
   for confdir; do
     [ -d "$confdir" ] || continue
-    find "${confdir}/" $depth -type f -iname "*.${kind}s" -print | sort -rn
-  done |
-    xargs sed -s '/^[ ]*#/d; /^$/d'
+    find "${confdir}/" $depth -type f -iname "*.${kind}s" -print | sort -rn |
+    xargs sed -E -s -e '/^\s*#/d' -e '/^$/d' \
+      -e 's/("'"$key"'"\s*:)/"origin": "'"${confdir//\//\\\/}"'", \1/g'
+  done
 } #}}}
 
-find_all() { #{{{
-  [ $# -ne 1 ] && return 1
-  kind=${1,,}
-  kind=${kind%s}
-  dump_content "$kind" "${search_dirs[@]}"
-} #}}}
-
-# TODO: Read data from the cache, not from the configuration files.
 get_keys() { #{{{
   [ $# -lt 2 ] && return 1
   kind=${1,,}
   kind=${kind%s}
-  key=${_keys[$kind]}
   volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
   shift
-  jqscript="unique_by(.${key}) | .[] | .${key}"
-  dump_content "$kind" "$@" | tee "$volatile" |
-    jq -sr "${jqscript}"
+  jqscript=$(printf 'include "nicy" ; dump("%s")' "$kind")
+  jq -nr -L "$NICY_DATADIR" "$jqscript" \
+    --argjson cachedb "$(<"$DATABASE")" \
+    --args "$@" \
+    |& tee "$volatile" \
+    | column -t -s $'\t' | tail -n +2
 } #}}}
 
 make_json_cache() { #{{{
-  kind=$1
-  key=${_keys[$kind]}
+  kind=${1,,}
+  kind=${kind%s}
   volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
-  jqscript=$(printf 'include "nicy" ; make_cache("%s")' "${key}")
-  find_all "$kind" | tee "$volatile" |
-    jq -sc -L "$NICY_DATADIR" --argjson "nproc" "$CPU_COUNT" "$jqscript"
+  jqscript=$(printf 'include "nicy" ; make_cache("%s")' "$kind")
+  for confdir in "${search_dirs[@]}"; do
+    dump_content "$kind" "$confdir" | jq -sc -L "$NICY_DATADIR" "$jqscript"
+  done |& tee "$volatile"
 } #}}}
 
 make_json_database() { #{{{
@@ -243,7 +224,7 @@ jsonify() { #{{{
   esac
 } #}}}
 
-TEMPLATE='{
+REQUEST_TEMPLATE='{
   "name": "%s",
   "which_cmd": "%s",
   "option": "%s",
@@ -259,7 +240,7 @@ TEMPLATE='{
 
 build_request() { #{{{
   cmd=$(find_which_cmd "$1")
-  printf "$TEMPLATE" \
+  printf "$REQUEST_TEMPLATE" \
     "$(basename "$cmd")" \
     "$cmd" \
     "${USE_TYPE}" \
@@ -274,12 +255,12 @@ build_request() { #{{{
 } #}}}
 
 COMMANDS="$RUNTIMEDIR/commands"
+
 get_commands() { #{{{
-  volatile="$COMMANDS"
   jqscript='include "nicy" ; main'
-  jq -r -L "$NICY_DATADIR" "$jqscript" \
-    --argjson request "$(build_request "$1")" \
-    "$DATABASE" |& tee "$volatile"
+  build_request "$1" | \
+    jq -r -L "$NICY_DATADIR" "$jqscript" \
+    --argjson cachedb "$(<"$DATABASE")" > "$COMMANDS"
 } #}}}
 
 # Parse options
@@ -321,7 +302,7 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
               SUBCMD=list
               LIST_KEYS=$kind
               ;;
-            *) error_exit 1 "not valid keys value '${OPTARG##*=}'." ;;
+            *) error_exit 1 "not a valid search key '${OPTARG##*=}'." ;;
           esac
           ;;
         from-dir=*)
@@ -329,9 +310,13 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
             error_exit 1 "missing required '--keys' option"
           dir=${OPTARG#from-dir=}
           dir=$(eval echo "$dir")
-          [ -d "$dir" ] &&
-            DIR_KEYS=$dir ||
+          [ ! -d "$dir" ] &&
             error_exit 1 "no such directory '$dir'"
+          case ":$(IFS=: ; echo "${search_dirs[*]}"):" in
+            *:$(realpath "$dir"):*) ;;
+            *) error_exit 1 "not a configured '$dir'" ;;
+          esac
+          DIR_KEYS=$dir
           ;;
         -) break ;;
         *) error_exit 1 "unknown option '$OPTARG'." ;;
@@ -364,7 +349,7 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
           SUBCMD=list
           LIST_KEYS=$kind
           ;;
-        *) error_exit 1 "not valid keys value '${OPTARG}'." ;;
+        *) error_exit 1 "not a valid search key '${OPTARG}'." ;;
       esac
       ;;
     \?) error_exit 1 "unknown option '$OPTARG'." ;;
@@ -412,8 +397,10 @@ find "${RUNTIMEDIR}/" -mindepth 1 -maxdepth 1 -type f -delete
 check_or_build_cache
 
 set +o errexit
+set +o nounset
+
 # Get commands
-get_commands "$cmd" >/dev/null
+get_commands "$cmd"
 ret=$?
 if [ "$ret" -ne 0 ]; then
   error_exit "$ret" "$(<"$COMMANDS")"
@@ -461,8 +448,7 @@ for cmdline in "${commands[@]}"; do
   [[ "$*" =~ ^exec.* ]] &&
     cmd+=("${my_args[@]}")
   if [ $VERBOSE -ge 1 ] || bool $DRY_RUN; then
-    msg="${PROG}: ${cmd[@]}"
-    sed "$sed_script" <<<"$msg" >&2
+    sed "$sed_script" <<<"${PROG}: ${cmd[@]}" >&2
   fi
   bool $DRY_RUN &&
     continue
