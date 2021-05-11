@@ -56,13 +56,13 @@ error_exit() { #{{{
 
 # The user 's configuration files always get the highest priority.
 for dir in "/usr/local/etc" "/etc" "${XDG_CONFIG_HOME:-$HOME/.config}"; do
-  [ -f "$dir/$PROG/environment" ] && . "$dir/$PROG/environment"
+  [ ! -f "$dir/$PROG/environment" ] || . "$dir/$PROG/environment"
 done
 
-[ ${#NICY_SEARCH_DIRS[@]} -eq 0 ] &&
+[ -v NICY_SEARCH_DIRS ] ||
   NICY_SEARCH_DIRS=("$HOME/.config/$PROG" "/etc/$PROG" "/usr/local/etc/$PROG")
 
-[ -z "$NICY_DATADIR" -o ! -d "$NICY_DATADIR" ] &&
+[ -v NICY_DATADIR -a -d "$NICY_DATADIR" ] ||
   NICY_DATADIR="/usr/local/share/nicy"
 
 bool() { #{{{
@@ -81,25 +81,23 @@ true_or_false() { #{{{
 } #}}}
 
 # Show what's going on
-if [ -n "$NICY_VERBOSE" ]; then
-  NICY_VERBOSE=$(true_or_false "$NICY_VERBOSE")
-else
-  NICY_VERBOSE=false
-fi
+[ -v NICY_VERBOSE ] &&
+  NICY_VERBOSE=$(true_or_false "$NICY_VERBOSE") ||
+  NICY_VERBOSE=true
 
 QUIET=false
-VERBOSE=0
+VERBOSITY=0
 bool "$NICY_VERBOSE" &&
-  VERBOSE=1
-USE_TYPE=auto
+  VERBOSITY=1
+PRESET=auto
 USE_CGROUP=null
-FORCE_CGROUP=false
+PROBE_CGROUP=false
 ALWAYS_USE_SCOPE=false
 DRY_RUN=false
-LIST_KEYS=
-DIR_KEYS=
+LIST_CATEGORY=
+LIST_DIRECTORY=
 
-SUBCMD=exec
+SUBCMD=run
 
 declare -ga search_dirs
 for dir in "${NICY_SEARCH_DIRS[@]}"; do
@@ -107,12 +105,11 @@ for dir in "${NICY_SEARCH_DIRS[@]}"; do
 done
 
 RUNTIMEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
-[ ! -d "$RUNTIMEDIR" ] && mkdir -p "$RUNTIMEDIR"
+[ -d "$RUNTIMEDIR" ] || mkdir -p "$RUNTIMEDIR"
 CACHEDIR="${XDG_CACHE_HOME:-$HOME/.cache}/${PROG}"
-[ ! -d "$CACHEDIR" ] && mkdir -p "$CACHEDIR"
+[ -d "$CACHEDIR" ] || mkdir -p "$CACHEDIR"
 
 CGROUPS="$CACHEDIR/cgroups"
-CPU_COUNT=$(nproc --all)
 TYPES="$CACHEDIR/types"
 RULES="$CACHEDIR/rules"
 DATABASE="$CACHEDIR/database"
@@ -120,6 +117,7 @@ DATABASE="$CACHEDIR/database"
 
 # Functions
 
+command -v jq &>/dev/null || error_exit 1 "$(command -V jq 2>&1)"
 JQ_PATH=$(command -v jq)
 jq() { $JQ_PATH -M "$@"; }
 
@@ -144,7 +142,7 @@ dump_content() { #{{{
   done
 } #}}}
 
-get_keys() { #{{{
+list() { #{{{
   [ $# -lt 2 ] && return 1
   kind=${1,,}
   kind=${kind%s}
@@ -158,7 +156,7 @@ get_keys() { #{{{
     | column -t -s $'\t' | tail -n +2
 } #}}}
 
-make_json_cache() { #{{{
+dump_content_file_cache() { #{{{
   kind=${1,,}
   kind=${kind%s}
   volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
@@ -168,7 +166,7 @@ make_json_cache() { #{{{
   done |& tee "$volatile"
 } #}}}
 
-make_json_database() { #{{{
+build_json_cache() { #{{{
   jqargs=()
   pairs=($(printf '"%s":%s' "date" "$(date +"%s")"))
   for kind in "cgroup" "type" "rule"; do
@@ -187,21 +185,21 @@ check_or_build_cache() { #{{{
     var="${kind^^}S"
     dest=${!var}
     if [ ! -f "$dest" ] || bool $do_rebuild; then
-      make_json_cache "$kind" >"$dest"
+      dump_content_file_cache "$kind" >"$dest"
     fi
   done
   if [ ! -f "$DATABASE" ] || bool $do_rebuild; then
-    make_json_database
+    build_json_cache
   fi
 } #}}}
 
-find_which_cmd() { #{{{
+find_cmd_path() { #{{{
   name=$(basename "$1")
   # Strip suffix, if any
   name=${name%.nicy}
   # Set an absolute path for the final command, trying to prevent loops (for
   # instance, with nested nicy invocations).
-  pattern="${HOME}/.*nicy.*" # Match default home path set by some nicy helper
+  pattern="^${NICY_SCRIPTS_PATH:-$HOME/bin/nicy}.*"
   # Not valid absolute path
   if [ "$1" = "$name" ] ||
     [[ "$(readlink -f $(which "$cmd"))" =~ $pattern ]]; then
@@ -224,43 +222,138 @@ jsonify() { #{{{
   esac
 } #}}}
 
-REQUEST_TEMPLATE='{
+QUERY_TEMPLATE='{
   "name": "%s",
-  "which_cmd": "%s",
-  "option": "%s",
-  "use_cgroup": %s,
-  "find_matching": %s,
-  "use_scope": %s,
+  "cmd": "%s",
+  "preset": "%s",
+  "cgroup": %s,
+  "probe_cgroup": %s,
+  "managed": %s,
   "quiet": %s,
-  "verbose": %d,
+  "verbosity": %d,
+  "shell": "%s",
   "nproc": %d,
-  "schedtool": "%s",
-  "ionice": "%s"
+  "max_nice": %d,
+  "policies": {
+    "sched": "%s",
+    "io": "%s"
+  }
 }'
 
-build_request() { #{{{
-  cmd=$(find_which_cmd "$1")
-  printf "$REQUEST_TEMPLATE" \
+[ -v NICY_SHELL ] &&
+  case "$NICY_SHELL" in
+    /bin/sh | /bin/bash | /bin/zsh | \
+      /usr/bin/sh | /usr/bin/bash | /usr/bin/zsh )
+      SCRIPT_SHELL=$NICY_SHELL ;;
+    *)
+      SCRIPT_SHELL=/bin/sh ;;
+  esac ||
+  SCRIPT_SHELL=/bin/sh
+
+build_query() { #{{{
+  case "$1" in
+    run)
+      SCHED=$(LANG=C schedtool $$)
+      IO=$(LANG=C ionice -p $$)
+      ;;
+    *)
+      QUIET=true
+      VERBOSITY=0
+      SCHED="PID  0: PRIO   0, POLICY N: SCHED_NORMAL  , NICE   0, AFFINITY 0x1"
+      IO="none: prio 0"
+      ;;
+  esac
+  shift
+  cmd=$(find_cmd_path "$1")
+  printf "$QUERY_TEMPLATE" \
     "$(basename "$cmd")" \
     "$cmd" \
-    "${USE_TYPE}" \
+    "${PRESET}" \
     $(jsonify ${USE_CGROUP}) \
-    ${FORCE_CGROUP} \
+    ${PROBE_CGROUP} \
     ${ALWAYS_USE_SCOPE} \
     ${QUIET} \
-    ${VERBOSE} \
-    $CPU_COUNT \
-    "$(LANG=C schedtool $$)" \
-    "$(LANG=C ionice -p $$)"
+    ${VERBOSITY} \
+    "$(basename "$SCRIPT_SHELL")" \
+    $(nproc --all) \
+    $(ulimit -H -e) \
+    "$SCHED" \
+    "$IO"
 } #}}}
 
 COMMANDS="$RUNTIMEDIR/commands"
 
 get_commands() { #{{{
+  volatile="$RUNTIMEDIR/${FUNCNAME[0]}"
   jqscript='include "nicy" ; main'
-  build_request "$1" | \
+  cat - | tee "$volatile" | \
     jq -r -L "$NICY_DATADIR" "$jqscript" \
-    --argjson cachedb "$(<"$DATABASE")" > "$COMMANDS"
+    --argjson cachedb "$(<"$DATABASE")" >"$COMMANDS" 2>&1
+} #}}}
+
+check_commands() { #{{{
+  ret=$?
+  [ "$ret" -ne 0 ] &&
+    error_exit "$ret" "$(<"$COMMANDS")" ||
+    true
+  [ "$(read -r line <"$COMMANDS"; echo $line)" != "commands" ] &&
+    error_exit 1 ||
+    true
+} #}}}
+
+run_commands() { #{{{
+  bool $QUIET &&
+    VERBOSITY=0
+  [ $UID -ne 0 ] &&
+    sed_script='s/ ${user_or_system}/ --user/; s/$SUDO /'"$SUDO"' /;' ||
+    sed_script='s/ ${user_or_system}//; s/$SUDO //;'
+  sed_script+=' s/\$\$/'"$$"'/; s/ >\/dev\/null 2>&1//'
+  for cmdline in "${commands[@]:1}"; do
+    [ -z "$cmdline" ] &&
+      continue
+    eval set -- $cmdline
+    [[ "$*" =~ ^\[.* ]] &&
+      continue
+    cmd=($*)
+    [[ "$*" =~ ^exec.* ]] &&
+      cmd+=("${cmdargs[@]}")
+    if [ $VERBOSITY -ge 1 ] || bool $DRY_RUN; then
+      sed "$sed_script" <<<"${PROG}: ${cmd[@]}" >&2
+    fi
+    bool $DRY_RUN &&
+      continue
+    eval "${cmd[@]}"
+  done
+} #}}}
+
+dump_script() { #{{{
+  echo "#!$SCRIPT_SHELL"
+  for cmdline in "${commands[@]:1}"; do
+    eval set -- $cmdline
+    [[ "$*" =~ ^exec.* ]] &&
+      echo "$*" '"$@"' ||
+      echo "$*"
+  done
+} #}}}
+
+do_lock() { #{{{
+  count=3
+  delay=1
+  lockfile="$1/lock"
+  while true; do
+    let count--
+    [ $count -le 0 ] && break
+    [ ! -f "$lockfile" ] && break
+    [ -f "$lockfile" ] && sleep $delay && continue
+  done
+  [ ! -f "$lockfile" ] &&
+    echo "$$" >"$lockfile" &&
+    return 0
+  error_exit 128 "runtime folder locked by nicy (pid=$(<"$lockfile")) instance."
+} #}}}
+
+do_unlock() { #{{{
+  [ -f "$1/lock" ] && rm "$1/lock" || true
 } #}}}
 
 # Parse options
@@ -279,20 +372,20 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
           ;;
         dry-run) DRY_RUN=true ;;
         quiet) QUIET=true ;;
-        verbose) VERBOSE=$(($VERBOSE + 1))   ;;
+        verbose) VERBOSITY=$(($VERBOSITY + 1))   ;;
         type=*) # Accepts auto, default, cgroup-only or any known type
           value=${OPTARG#type=}
           [[ "${value,,}" =~ (auto|default|cgroup-only) ]] &&
-            USE_TYPE="${value,,}" ||
-            USE_TYPE="$value"
+            PRESET="${value,,}" ||
+            PRESET="$value"
           ;;
         cgroup=*) USE_CGROUP="${OPTARG#cgroup=}" ;;
-        default) USE_TYPE="default" ;;
-        cgroup-only) USE_TYPE="cgroup-only" ;;
+        default) PRESET="default" ;;
+        cgroup-only) PRESET="cgroup-only" ;;
         managed) ALWAYS_USE_SCOPE=true ;;
-        force-cgroup) FORCE_CGROUP=true ;;
+        force-cgroup) PROBE_CGROUP=true ;;
         cpu*) USE_CGROUP="$OPTARG" ;;
-        build-script) SUBCMD=show-script ;;
+        build-script) SUBCMD=show ;;
         keys=*)
           kind=${OPTARG#keys=}
           kind=${kind,,}
@@ -300,13 +393,13 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
           case "$kind" in
             rule | type | cgroup)
               SUBCMD=list
-              LIST_KEYS=$kind
+              LIST_CATEGORY=$kind
               ;;
-            *) error_exit 1 "not a valid search key '${OPTARG##*=}'." ;;
+            *) error_exit 1 "not a valid category '${OPTARG##*=}'." ;;
           esac
           ;;
         from-dir=*)
-          [ -z "$LIST_KEYS" ] &&
+          [ -z "$LIST_CATEGORY" ] &&
             error_exit 1 "missing required '--keys' option"
           dir=${OPTARG#from-dir=}
           dir=$(eval echo "$dir")
@@ -316,7 +409,7 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
             *:$(realpath "$dir"):*) ;;
             *) error_exit 1 "not a configured '$dir'" ;;
           esac
-          DIR_KEYS=$dir
+          LIST_DIRECTORY=$dir
           ;;
         -) break ;;
         *) error_exit 1 "unknown option '$OPTARG'." ;;
@@ -326,28 +419,28 @@ while getopts ":-:hsnqvt:c:k:dzmu" option; do #{{{
       usage
       exit 0
       ;;
-    s) SUBCMD=show-script ;;
+    s) SUBCMD=show ;;
     n) DRY_RUN=true ;;
     q) QUIET=true ;;
-    v) VERBOSE=$(($VERBOSE + 1))   ;;
+    v) VERBOSITY=$(($VERBOSITY + 1))   ;;
     m) ALWAYS_USE_SCOPE=true ;;
-    u) FORCE_CGROUP=true ;;
+    u) PROBE_CGROUP=true ;;
     t) # Accepts auto, default, cgroup-only or any known type
       value=$OPTARG
       [[ "${value,,}" =~ (auto|default|cgroup-only) ]] &&
-        USE_TYPE="${value,,}" ||
-        USE_TYPE="$value"
+        PRESET="${value,,}" ||
+        PRESET="$value"
       ;;
     c) USE_CGROUP="$OPTARG" ;;
-    d) USE_TYPE="default" ;;
-    z) USE_TYPE="cgroup-only" ;;
+    d) PRESET="default" ;;
+    z) PRESET="cgroup-only" ;;
     k)
       kind=${OPTARG,,}
       kind=${kind%s}
       case "$kind" in
         rule | type | cgroup)
           SUBCMD=list
-          LIST_KEYS=$kind
+          LIST_CATEGORY=$kind
           ;;
         *) error_exit 1 "not a valid search key '${OPTARG}'." ;;
       esac
@@ -364,9 +457,9 @@ case "$SUBCMD" in #{{{
     exit 0
     ;;
   list)
-    [ -z "$DIR_KEYS" ] &&
-      get_keys "$LIST_KEYS" "${search_dirs[@]}" ||
-      get_keys "$LIST_KEYS" "$DIR_KEYS"
+    [ -z "$LIST_DIRECTORY" ] &&
+      list "$LIST_CATEGORY" "${search_dirs[@]}" ||
+      list "$LIST_CATEGORY" "$LIST_DIRECTORY"
     exit 0
     ;;
   rebuild)
@@ -387,72 +480,44 @@ which "$1" &>/dev/null ||
 cmd=$1
 shift
 
-# Save the command arguments, if any, for later
-declare -ga my_args=("$@")
+# Save the command arguments, if any, for later use
+declare -ga cmdargs=("$@")
 
-# TODO: Lock the runtime dir
+# Lock the runtime dir
+do_lock "$RUNTIMEDIR"
 
 # Purge old runtime files and check cache
 find "${RUNTIMEDIR}/" -mindepth 1 -maxdepth 1 -type f -delete
 check_or_build_cache
 
-set +o errexit
-set +o nounset
+# Set environment
+NICY_SUDO=${NICY_SUDO:-sudo}
+if [ $UID -ne 0 ]; then
+  declare -x user_or_system=--user
+  # Don't export SUDO when command is not allowed by policy
+  sudo -l renice &>/dev/null &&
+    declare -x SUDO=${NICY_SUDO} || true
+else
+  declare -x user_or_system=
+  declare -x SUDO=
+fi
 
 # Get commands
-get_commands "$cmd"
-ret=$?
-if [ "$ret" -ne 0 ]; then
-  error_exit "$ret" "$(<"$COMMANDS")"
-fi
+case "$SUBCMD" in
+  run) build_query run "$cmd" ;;
+  show) build_query show "$cmd" ;;
+  *) error_exit 1 ;;
+esac |
+  get_commands && check_commands
 mapfile -t commands <"$COMMANDS"
 
-if [ "${commands[0]}" != "commands" ]; then
-  error_exit 1
-fi
+# Unlock the runtime dir
+do_unlock "$RUNTIMEDIR"
 
-unset commands[0]
-
-# TODO: Unlock the runtime dir
-
-if [ "$SUBCMD" = "show-script" ]; then
-  echo "#!/bin/bash"
-  for cmdline in "${commands[@]}"; do
-    eval set -- $cmdline
-    [[ "$*" =~ ^exec.* ]] &&
-      echo "$*" '"$@"' ||
-      echo "$*"
-  done
+if [ "$SUBCMD" = "show" ]; then
+  dump_script
   exit 0
 fi
 
-bool $QUIET &&
-  VERBOSE=0
-
-if [ $UID -ne 0 ]; then
-  user_or_system=--user
-  sed_script='s/ ${user_or_system}/ --user/;'
-else
-  user_or_system=
-  sed_script='s/ ${user_or_system}//;'
-fi
-sed_script+=' s/\$\$/'"$$"'/; s/ &>\/dev\/null//'
-
-for cmdline in "${commands[@]}"; do
-  [ -z "$cmdline" ] &&
-    continue
-  eval set -- $cmdline
-  [[ "$*" =~ ^\[.* ]] &&
-    continue
-  cmd=($*)
-  [[ "$*" =~ ^exec.* ]] &&
-    cmd+=("${my_args[@]}")
-  if [ $VERBOSE -ge 1 ] || bool $DRY_RUN; then
-    sed "$sed_script" <<<"${PROG}: ${cmd[@]}" >&2
-  fi
-  bool $DRY_RUN &&
-    continue
-  eval "${cmd[@]}"
-done
-
+run_commands
 exit 0

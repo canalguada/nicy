@@ -117,14 +117,14 @@ def get_entries:
     // get_type_or_die("default") ;
 
   def type_or_die:
-    get_type_or_die(.request.option) ;
+    get_type_or_die(.request.preset) ;
 
   def keep_cgroup_only:
     del_entry((.entries|keys) - ["name", "cgroup", "env", "cmdargs"]) ;
 
   def move_to_cgroup:
     # Do not use any unknown cgroup
-    .entries += get_cgroup_or_die(.request.use_cgroup) ;
+    .entries += get_cgroup_or_die(.request.cgroup) ;
 
   def current_cgroup_properties:
     .entries | delpaths([paths] - cgroup_paths) ;
@@ -132,7 +132,6 @@ def get_entries:
   def format_slice_properties:
     (get_cgroup_or_die(_("cgroup")) | del(.cgroup, .origin)) as $properties
     | .request.nproc as $cores
-    # | .entries |= delpaths([$properties | paths])
     | del_entry($properties | keys)
     | .entries += {
       "slice_properties": (
@@ -157,8 +156,7 @@ def get_entries:
   ;
 
   def rule_or_type:
-    # if .request.option | test( "^(auto|cgroup-only)$"; "i")
-    if .request.option | in_array(["auto", "cgroup-only"])
+    if .request.preset | in_array(["auto", "cgroup-only"])
     then rule_or_default
     else type_or_die
     end ;
@@ -170,12 +168,27 @@ def get_entries:
     as $cgroupdef
     | .entries += $typedef + $cgroupdef + ($r | del(.type, .cgroup)) ;
 
+  def set_credentials:
+    def flag($key):
+      .entries.cred += ["\($key)"] ;
+
+    if has_entry("nice") and (_("nice") < 0) then
+      flag("nice")
+    else . end
+    | if has_entry("sched") and (_("sched") | in_array(["fifo", "rr"])) then
+      flag("sched")
+    else . end
+    | if has_entry("ioclass") and (_("ioclass") == "realtime") then
+      flag("ioclass")
+    else . end ;
+
+
   load_from(rule_or_type)
 
-  | if .request.option == "cgroup-only" then keep_cgroup_only else . end
-  | if .request.use_cgroup != null then move_to_cgroup else . end
+  | if .request.preset == "cgroup-only" then keep_cgroup_only else . end
+  | if .request.cgroup != null then move_to_cgroup else . end
   # No cgroup defined in configuration files nor _("requested") by user
-  | if (has_entry("cgroup") | not) and (.request.find_matching == true) then
+  | if (has_entry("cgroup") | not) and (.request.probe_cgroup == true) then
       move_to_matching_cgroup
   # Use cgroup from rule found in configuration file, if any
   else . end
@@ -183,11 +196,22 @@ def get_entries:
   | if _("cgroup") != null then
     # Extract and format slice properties, if any
     format_slice_properties
-  else del_entry("cgroup") end ;
+  else del_entry("cgroup") end
+  | set_credentials ;
 
-def get_commands:
+def get_commands($shell):
   def add_command($cmdargs):
     .commands += [$cmdargs] ;
+
+  def quiet_command($cmdargs):
+    add_command($cmdargs + [">/dev/null", "2>&1"]) ;
+
+  def set_sudo_if_required:
+    if has_entry("cred") and (_("cred") | contains(["sudo"]) | not) then
+      # Require authentication for privileged operations.
+      add_command(["[ $(id -u) -ne 0 ] && SUDO=\(env.SUDO) || SUDO="])
+      | .entries.cred += ["sudo"]
+    else . end ;
 
   def process_env:
     if has_entry("env") then
@@ -198,14 +222,27 @@ def get_commands:
       end
     else . end ;
 
-  def process_nice:
+  def process_nice($shell):
+    def ulimit_cmdargs:
+      ["ulimit", "-S", "-e", "\(20 - _("nice"))"] ;
+    def renice_cmdargs:
+      ["renice", "-n", "\(_("nice"))", "-p", "$$"] ;
+
     if has_entry("nice") then
-      add_command(["ulimit", "-S", "-e", "\(20 - _("nice"))", "&>/dev/null"])
-      | if .use_scope then .
-      else
-        add_command(["renice", "-n", "\(_("nice"))", "&>/dev/null"])
-        | del_entry("nice")
-      end
+      if has_entry("cred") and (_("cred") | contains(["nice"])) then
+        if .use_scope and (20 - _("nice") <= .request.max_nice)
+          and (($shell == "bash") or ($shell == "zsh")) then
+          # Update soft limit and let systemd-run change the niceness
+          quiet_command(ulimit_cmdargs)
+        else
+          set_sudo_if_required
+          | quiet_command(["$SUDO"] + renice_cmdargs)
+          | del_entry("nice")
+        end
+      elif .use_scope | not then
+          quiet_command(renice_cmdargs)
+          | del_entry("nice")
+      else . end
     else . end ;
 
   def process_oom_score_adj:
@@ -213,9 +250,7 @@ def get_commands:
       if .use_scope then
         .exec_cmd += ["choom", "-n", "\(_("oom_score_adj"))", "--"]
       else
-        add_command([
-          "choom", "-n", "\(_("oom_score_adj"))", "-p", "$$", "&>/dev/null"
-        ])
+        quiet_command(["choom", "-n", "\(_("oom_score_adj"))", "-p", "$$"])
       end
       | del_entry("oom_score_adj")
     else . end ;
@@ -223,15 +258,7 @@ def get_commands:
   def process_sched_rtprio:
     def schedtool_args:
       def get_sched($key):
-        [
-          {
-            "other": "-N",
-            "fifo": "-F",
-            "rr": "-R",
-            "batch": "-B",
-            "idle": "-D"
-          }[$key]
-        ] ;
+        [{"other": "-N", "fifo": "-F", "rr": "-R", "batch": "-B", "idle": "-D"}[$key]] ;
 
       def get_rtprio($flag):
         .entries
@@ -241,37 +268,34 @@ def get_commands:
         else null end ;
 
       . + { "args": [] }
-      | if (has_entry("sched")) then
+      | if has_entry("sched") then
         try
           (.args += [get_sched(_("sched"))])
         catch ("bad sched value '\(_("sched"))'" | halt_error(8))
       else . end
-      | if (has_entry("rtprio")) then
-        .args += get_rtprio(.request.schedtool | test("POLICY (F|R):"; "i"))
+      | if has_entry("rtprio") then
+        .args += get_rtprio(.request.policies.sched | test("POLICY (F|R):"; "i"))
       else . end
       | .args ;
 
     schedtool_args as $args
     | del_entry(["sched", "rtprio"])
     | if ($args|length) > 0 then
-      if .use_scope then
+      # Set privileges when required
+      if has_entry("cred") and (_("cred") | contains(["sched"])) then
+        set_sudo_if_required
+        | quiet_command(["$SUDO", "schedtool"] + $args + ["$$"])
+      elif .use_scope then
         .exec_cmd += ["schedtool"] + $args + ["-e"]
       else
-        add_command(["schedtool"] + $args + ["$$", "&>/dev/null"])
+        quiet_command(["schedtool"] + $args + ["$$"])
       end
     else . end ;
 
   def process_ioclass_ionice:
     def ionice_args:
       def get_ioclass($key):
-        [
-          {
-            "none": "0",
-            "realtime": "1",
-            "best-effort": "2",
-            "idle": "3"
-          }[$key]
-        ] ;
+        [{"none": "0", "realtime": "1", "best-effort": "2", "idle": "3"}[$key]] ;
 
       def get_ionice($flag):
         .entries
@@ -282,23 +306,26 @@ def get_commands:
         else null end ;
 
       . + { "args": [] }
-      | if (has_entry("ioclass")) then
+      | if has_entry("ioclass") then
         try (.args += ["-c", get_ioclass(_("ioclass"))])
         catch ("bad ioclass value '\(_("ioclass"))'"|halt_error(8))
       else . end
-      | if (has_entry("ionice")) then
-        # .args += get_ionice(.request.ionice | test("^(realtime|best-effort):"; "i"))
-        .args += get_ionice(.request.ionice | in_array(["realtime", "best-effort"]))
+      | if has_entry("ionice") then
+        .args += get_ionice(.request.policies.io | test("^(realtime|best-effort):"; "i"))
       else . end
       | .args ;
 
     ionice_args as $args
     | del_entry(["ioclass", "ionice"])
     | if ($args|length) > 0 then
-      if .use_scope then
+      # Set privileges when required
+      if has_entry("cred") and (_("cred") | contains(["ioclass"])) then
+        set_sudo_if_required
+        | quiet_command(["$SUDO", "ionice", "-t"] + $args + ["-p", "$$"])
+      elif .use_scope then
         .exec_cmd += ["ionice", "-t"] + $args
       else
-        add_command(["ionice", "-t"] + $args + ["-p", "$$", "&>/dev/null"])
+        quiet_command(["ionice", "-t"] + $args + ["-p", "$$"])
       end
     else . end ;
 
@@ -314,24 +341,22 @@ def get_commands:
       .exec_args += [
         "systemd-run", "${user_or_system}", "-G", "-d", "--no-ask-password"
       ]
-      | if .request.quiet or (.request.verbose < 2) then
+      | if .request.quiet or (.request.verbosity < 2) then
         .exec_args += ["--quiet"]
       else . end
-      | (.request.which_cmd | sub(".*/"; ""; "l")) as $name
+      | (.request.cmd | sub(".*/"; ""; "l")) as $name
       | .exec_args += ["--unit=\($name)-$$", "--scope"] ;
 
     def slice_unit:
       "nicy-\(_("cgroup")).slice" ;
 
     def cmd_start_slice_unit:
-      add_command([
-        "systemctl", "${user_or_system}", "start", slice_unit, "&>/dev/null"
-      ]) ;
+      quiet_command(["systemctl", "${user_or_system}", "start", slice_unit]) ;
 
     def cmd_set_slice_properties:
-      add_command([
+      quiet_command([
         "systemctl", "${user_or_system}", "--runtime",
-        "set-property", slice_unit, _("slice_properties"), "&>/dev/null"
+        "set-property", slice_unit, _("slice_properties")
       ])
       | del_entry("slice_properties") ;
 
@@ -366,7 +391,7 @@ def get_commands:
         | del_entry("env")
       else . end
     else . end
-    | .exec_cmd += [.request.which_cmd]
+    | .exec_cmd += [.request.cmd]
     | if has_entry("cmdargs") then
       .exec_cmd += _("cmdargs")
       | del_entry("cmdargs")
@@ -380,15 +405,14 @@ def get_commands:
     "exec_cmd": []
   }
 
-  | if .request.use_scope or (has_entry("cgroup")) then
+  | if .request.managed or (has_entry("cgroup")) then
     .use_scope = true
   else . end
-  | process_env
   | if .use_scope then
-    # No authentication here for privileged operations.
-    add_command(["[ $UID -ne 0 ] && user_or_system=--user"])
+    add_command(["[ $(id -u) -ne 0 ] && user_or_system=--user"])
   else . end
-  | process_nice
+  | process_env
+  | process_nice($shell)
   | process_oom_score_adj
   | process_sched_rtprio
   | process_ioclass_ionice
@@ -396,9 +420,9 @@ def get_commands:
 
 def main:
   # Expects request as input and cachedb as named json arg
-  { "request": ., "entries": {} }
+  { "request": ., "entries": { "cred": [] } }
   | get_entries
-  | get_commands
+  | get_commands(.request.shell)
   | if has("error") then
      "error", .error
    else "commands", (.commands[] | (map(@sh) | join(" ")))
@@ -413,17 +437,17 @@ def parse_entry($kind):
     if .value == "infinity" then .
     elif .value | is_percentage then .value |= "\(rtrimstr("%"))%"
     elif .value | is_bytes then .value |= ascii_upcase
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_cpuquota:
     if .value | is_percentage then
       .key |= "CPUQuota"
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_ioweight:
     if .value | in_range(1; 10000) then
       .key |= "IOWeight"
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_memoryhigh:
     .key |= "MemoryHigh"
@@ -435,38 +459,38 @@ def parse_entry($kind):
 
   def parse_nice:
     if .value | in_range(-20; 19) then .
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_sched:
     if .value | in_array(["other", "fifo", "rr", "batch", "idle"]) then .
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_rtprio:
     if .value | in_range(1; 99) then .
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_ioclass:
     if .value | in_array(["none", "realtime", "best-effort", "idle"]) then .
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_ionice:
     if .value | in_range(0; 7) then .
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_oom_score_adj:
     if .value | in_range(-1000; 1000) then .
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_cmdargs:
     if (.value | type) == "array" then .
     elif (.value | type) == "string" then .value |= [.value]
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   def parse_env:
     if (.value | type) == "object" then .value |= object_to_array
     elif (.value | type) == "array" then .
     elif (.value | type) == "string" then .value |= [.value]
-    else error("bad value : \(.value)") end ;
+    else error("while parsing '\(.key)' key, bad value : \(.value)") end ;
 
   label $out
   | (
@@ -497,7 +521,7 @@ def parse_entry($kind):
     elif .key == "ionice" then parse_ionice
     elif .key == "oom_score_adj" then parse_oom_score_adj
     else break $out end
-  elif [.key] | inside(rule_keys - type_keys) then
+  elif .key | in_array(rule_keys - type_keys) then
     if .key == "cmdargs" then parse_cmdargs
     elif .key == "env" then parse_env
     else break $out end

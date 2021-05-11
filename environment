@@ -1,8 +1,17 @@
 # User configuration files, if any, then global ones
-NICY_SEARCH_DIRS=( "$HOME/.config/nicy" "/usr/local/etc/nicy" )
+# NICY_SEARCH_DIRS=( "$HOME/.config/nicy" "/usr/local/etc/nicy" )
 
 # Nicy jq library path
 # NICY_DATADIR="/usr/local/share/nicy"
 
 # Show what command is launched and some more information from systemd-run
-NICY_VERBOSE="y"
+# NICY_VERBOSE="y"
+
+# Nicy will use this shell when writing scripts
+# NICY_SHELL=/bin/sh
+
+# Nicy will use this command when root-credentials are required
+# NICY_SUDO=sudo
+
+# Helper will use this path to preinstall nicy scripts for required commands
+# NICY_SCRIPTS_PATH="$HOME/bin/nicy"
