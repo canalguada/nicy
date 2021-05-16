@@ -3,6 +3,14 @@ module "nicy" ;
 # Common functions
 # ================
 
+def jsonify:
+  if test("^[0-9]*$"; "") then tonumber
+  elif test("^true$"; "") then true
+  elif test("^false$"; "") then false
+  elif test("^null$"; "") then null
+  else tostring
+  end ;
+
 # def to_object($in_array):
 #   $in_array
 #   | reduce range(0; length; 2) as $i (
@@ -107,6 +115,36 @@ def dump($kind):
 
 # Main filter
 # ===========
+
+def request_template:
+  {
+    "name": null,
+    "cmd": null,
+    "preset": null,
+    "cgroup": null,
+    "probe_cgroup": null,
+    "managed": null,
+    "quiet": null,
+    "verbosity": null,
+    "shell": null,
+    "nproc": null,
+    "max_nice": null,
+    "policies": {
+      "sched": null,
+      "io": null
+    }
+  } ;
+
+def build_request:
+  map(jsonify) as $jsonargs
+  | request_template
+  | ([paths] - [["policies"]]) as $paths
+  | last(
+    foreach range(0; length + 1) as $pos (
+      {};
+      setpath($paths[$pos]; $jsonargs[$pos])
+    )
+  ) ;
 
 # Use 'auto' option to get the rule for the 'name' command, if any (default).
 # Use 'cgroup-only' to remove everything but the cgroup from the rule.
@@ -227,11 +265,14 @@ def get_commands($shell):
       ["ulimit", "-S", "-e", "\(20 - _("nice"))"] ;
     def renice_cmdargs:
       ["renice", "-n", "\(_("nice"))", "-p", "$$"] ;
+    def supported_shell:
+      ($shell | sub(".*/"; ""; "l")) as $basename
+      | ($basename == "bash") or ($basename == "zsh") ;
 
     if has_entry("nice") then
       if has_entry("cred") and (_("cred") | contains(["nice"])) then
         if .use_scope and (20 - _("nice") <= .request.max_nice)
-          and (($shell == "bash") or ($shell == "zsh")) then
+          and supported_shell then
           # Update soft limit and let systemd-run change the niceness
           quiet_command(ulimit_cmdargs)
         else
@@ -258,7 +299,7 @@ def get_commands($shell):
   def process_sched_rtprio:
     def schedtool_args:
       def get_sched($key):
-        [{"other": "-N", "fifo": "-F", "rr": "-R", "batch": "-B", "idle": "-D"}[$key]] ;
+        {"other": "-N", "fifo": "-F", "rr": "-R", "batch": "-B", "idle": "-D"}[$key] ;
 
       def get_rtprio($flag):
         .entries
@@ -295,7 +336,7 @@ def get_commands($shell):
   def process_ioclass_ionice:
     def ionice_args:
       def get_ioclass($key):
-        [{"none": "0", "realtime": "1", "best-effort": "2", "idle": "3"}[$key]] ;
+        {"none": "0", "realtime": "1", "best-effort": "2", "idle": "3"}[$key] ;
 
       def get_ionice($flag):
         .entries
@@ -344,7 +385,7 @@ def get_commands($shell):
       | if .request.quiet or (.request.verbosity < 2) then
         .exec_args += ["--quiet"]
       else . end
-      | (.request.cmd | sub(".*/"; ""; "l")) as $name
+      | .request.name as $name
       | .exec_args += ["--unit=\($name)-$$", "--scope"] ;
 
     def slice_unit:
@@ -409,7 +450,9 @@ def get_commands($shell):
     .use_scope = true
   else . end
   | if .use_scope then
-    add_command(["[ $(id -u) -ne 0 ] && user_or_system=--user"])
+    add_command([
+      "[ $(id -u) -ne 0 ] && user_or_system=--user || user_or_system="
+    ])
   else . end
   | process_env
   | process_nice($shell)
@@ -419,8 +462,8 @@ def get_commands($shell):
   | process_exec ;
 
 def main:
-  # Expects request as input and cachedb as named json arg
-  { "request": ., "entries": { "cred": [] } }
+  # Expects request values as positional args and cachedb as named json arg
+  { "request": ($ARGS.positional | build_request), "entries": { "cred": [] } }
   | get_entries
   | get_commands(.request.shell)
   | if has("error") then
@@ -537,5 +580,50 @@ def make_cache($kind):
     with_entries(parse_entry($kind))
   # Raise error
   else ("can't parse '\(type)' input building cache" | halt_error(1)) end ;
+
+# Install functions
+# ================
+
+def stream_scripts_from_rules($shell; $nproc; $max_nice):
+  def names:
+    rules
+    | map("\(.name)")
+    | unique
+    | . - $ARGS.positional ;
+
+  def values:
+    [
+      .,
+      "%\(.)%",
+      "auto",
+      null,
+      false,
+      false,
+      true,
+      0,
+      $shell,
+      $nproc,
+      $max_nice,
+      "PID  0: PRIO   0, POLICY N: SCHED_NORMAL  , NICE   0, AFFINITY 0x1",
+      "none: prio 0"
+    ] ;
+
+  names[]
+  | { 
+    "request": (values | map(tostring) | build_request),
+    "entries": {
+      "cred": []
+    }
+  }
+  | get_entries
+  | get_commands(.request.shell)
+  | if has("error") then
+     "error", .error
+  else
+    "begin \(.request.name)",
+    "'#!\(.request.shell)'",
+    (.commands[] | (map(@sh) | join(" "))),
+    "end \(.request.name)"
+  end ;
 
 # vim: set ft=jq fdm=indent ai ts=2 sw=2 tw=79 et:

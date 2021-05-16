@@ -1,0 +1,53 @@
+{
+  "program": "nicy",
+  "version": "0.1.0",
+  "description": "Set the execution environment and the available resources.",
+  "usage": {
+    "run": "run [OPTIONS]... COMMAND [ARGUMENTS]...",
+    "show": "show [OPTIONS]... COMMAND",
+    "list": "list [OPTIONS] CATEGORY",
+    "rebuild": "rebuild",
+    "install": "install [OPTIONS] [SHELL]"
+  },
+  "text": {
+    "run": "Run the COMMAND in a pre-set execution environment.",
+    "show": "Show the effective script for the given COMMAND and OPTIONS.",
+    "list": "List the objects from this CATEGORY, removing all duplicates.",
+    "rebuild": "Rebuild the json cache and exit.",
+    "install": "Install scripts, using SHELL if any."
+  },
+  "options": {
+    "run": [ "-n, --dry-run        Display commands but do not run them" ],
+    "show": [
+      "-q, --quiet          Suppress additional output",
+      "-v, --verbose        Display which command is launched",
+      "-p, --preset=PRESET  Apply this PRESET",
+      "-d, --default        Like '--preset=default'",
+      "-z, --cgroup-only    Like '--preset=cgroup-only'",
+      "-c, --cgroup=CGROUP  Run inside this CGROUP",
+      "    --cpu<QUOTA>     Like '--cgroup=cpu<QUOTA>'",
+      "-m, --managed        Run inside a scope, required or not",
+      "-u, --force-cgroup   Run inside a matching cgroup, if any"
+    ],
+    "list": [ "-f, --from=DIRECTORY List only objects from this DIRECTORY" ],
+    "rebuild": [],
+    "install": [],
+    "help": [ "-h, --help           Display this help and exit" ]
+  },
+  "details":{
+    "run": [
+      "The PRESET argument can be: 'auto' to apply the specific preset for the command, its rule, if any; 'cgroup-only' to apply only the cgroup properties of that rule, if found; 'default' to apply the special fallback preset; or any generic preset, a type.",
+      "The CGROUP argument can be a cgroup defined in configuration files.",
+      "The QUOTA argument can be an integer ranging from 1 to 99 that represents a percentage relative to the total CPU time available on all cores."
+    ],
+    "show": [],
+    "list": [
+      "The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching the extensions of configuration files.",
+      "The DIRECTORY argument can be a path from NICY_SEARCH_DIRS setting. When filtering per DIRECTORY, no duplicate is removed taking into account the priority between directories."
+    ],
+    "install": [
+      "The SHELL argument can be a path to a supported shell (sh, dash, bash, zsh). Default value is /bin/sh.",
+      "Only installs scripts for rules matching a command found."
+    ]
+  }
+}

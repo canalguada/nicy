@@ -7,11 +7,18 @@
 # Show what command is launched and some more information from systemd-run
 # NICY_VERBOSE="y"
 
-# Nicy will use this shell when writing scripts
+# Use this shell when writing scripts
 # NICY_SHELL=/bin/sh
 
-# Nicy will use this command when root-credentials are required
+# Use this command when root-credentials are required
 # NICY_SUDO=sudo
 
-# Helper will use this path to preinstall nicy scripts for required commands
+# Use this path to install scripts
 # NICY_SCRIPTS_PATH="$HOME/bin/nicy"
+
+# Ignore the commands listed in this file when installing scripts
+# NICY_IGNORE="${NICY_SEARCH_DIRS[0]}/ignore"
+
+# Symlink the scripts of the corresponding commands listed in this file after installing them
+# NICY_SYMLINK="${NICY_SEARCH_DIRS[0]}/symlink"
+

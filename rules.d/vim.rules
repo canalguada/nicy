@@ -1,5 +1,6 @@
 # Vim https://www.vim.org/
 # Nvim https://neovim.io/
+# Neovim-qt https://github.com/equalsraf/neovim-qt 
 { "name": "vim", "type": "Doc-View", "cgroup": "cpu66" }
 { "name": "nvim", "type": "Doc-View", "cgroup": "cpu66", "cmdargs": ["--listen", "/tmp/nvimsocket"], "env": {"SHELL":"/bin/bash"} }
 { "name": "nvim-qt", "type": "Doc-View", "cgroup": "cpu66", "cmdargs": ["--nofork", "--nvim /usr/bin/nvim"], "env": {"SHELL":"/bin/bash"} }
