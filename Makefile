@@ -12,6 +12,7 @@ install-scripts:
 	install -m755 nicy.jq $(DESTDIR)$(datadir)/
 	install -m755 usage.jq $(DESTDIR)$(datadir)/
 	install -m755 usage.json $(DESTDIR)$(datadir)/
+	install -m755 procstat.awk $(DESTDIR)$(datadir)/
 
 install-conf:
 	install -d $(DESTDIR)$(confdir)/rules.d
@@ -28,6 +29,7 @@ uninstall-scripts:
 	rm -f $(DESTDIR)$(datadir)/nicy.jq
 	rm -f $(DESTDIR)$(datadir)/usage.jq
 	rm -f $(DESTDIR)$(datadir)/usage.json
+	rm -f $(DESTDIR)$(datadir)/procstat.awk
 
 uninstall-conf:
 	rm -f $(DESTDIR)$(confdir)/environment

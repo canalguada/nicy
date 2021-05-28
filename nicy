@@ -39,7 +39,7 @@ done
 [ -v NICY_SEARCH_DIRS ] ||
   NICY_SEARCH_DIRS=("$HOME/.config/$PROG" "/etc/$PROG" "/usr/local/etc/$PROG")
 
-[ -v NICY_DATADIR -a -d "$NICY_DATADIR" ] ||
+[ -v NICY_DATADIR ] ||
   NICY_DATADIR="/usr/local/share/nicy"
 
 [ -v NICY_VERBOSE ] &&
@@ -78,6 +78,7 @@ if [ $UID -ne 0 ] &&
 else
   declare -x SUDO=
 fi
+[ -v SUDO ] || declare -x SUDO=":"
 #}}}
 
 command -v jq &>/dev/null ||
@@ -104,11 +105,18 @@ jq_usage() { #{{{
     fmt -s -w $WIDTH
 } #}}}
 
-run_usage() { jq_usage ; } 
-show_usage() { jq_usage ; } 
-list_usage() { jq_usage ; } 
-install_usage() { jq_usage ; } 
-rebuild_usage() { jq_usage ; } 
+version() { #{{{
+  jqscript='include "usage"; version'
+  jq -r -L "$NICY_DATADIR" "$jqscript" "${NICY_DATADIR}/usage.json" |
+    fmt -s -w $WIDTH
+} #}}}
+
+run_usage() { jq_usage ; }
+show_usage() { jq_usage ; }
+list_usage() { jq_usage ; }
+install_usage() { jq_usage ; }
+rebuild_usage() { jq_usage ; }
+manage_usage() { jq_usage ; }
 #}}}
 
 # Runtime parameters {{{
@@ -123,6 +131,7 @@ ALWAYS_USE_SCOPE=false
 DRY_RUN=false
 LIST_CATEGORY=
 LIST_DIRECTORY=
+DO_MANAGE=
 #}}}
 
 # Global variables {{{
@@ -288,34 +297,52 @@ get_cmdlines() { #{{{
     "$IO" >"$COMMANDS" 2>&1
   ret=$?
   [ "$ret" -ne 0 ] &&
-    error_exit "$ret" "$(<"$COMMANDS")" ||
+    error_exit "$ret" "jq: $(<"$COMMANDS")" ||
     true
   [ "$(read -r line <"$COMMANDS"; echo $line)" != "commands" ] &&
     error_exit 1 ||
     true
 } #}}}
 
+if [ $UID -ne 0 ]; then
+  print_command() { #{{{
+    text="${PROG}: ${subcmd}: $@"
+    text=${text// \$\{user_or_system\}/ --user}
+    text=${text//\$SUDO /$SUDO }
+    text=${text//\$\$/$$}
+    text=${text// >\/dev\/null/}
+    echo "$text"
+  } #}}}
+else
+  print_command() { #{{{
+    text="${PROG}: ${subcmd}: $@"
+    text=${text// \$\{user_or_system\}/}
+    text=${text//\$SUDO /}
+    text=${text//\$\$/$$}
+    text=${text// >\/dev\/null/}
+    echo "$text"
+  } #}}}
+fi
+
 run_commands() { #{{{
   bool $QUIET &&
     VERBOSITY=0
-  [ $UID -ne 0 ] &&
-    sed_script='s/ ${user_or_system}/ --user/; s/$SUDO /'"$SUDO"' /;' ||
-    sed_script='s/ ${user_or_system}//; s/$SUDO //;'
-  sed_script+=' s/\$\$/'"$$"'/; s/ >\/dev\/null 2>&1//'
   for cmdline; do
     [ -z "$cmdline" ] &&
       continue
     eval set -- $cmdline
-    [[ "$*" =~ ^\[.* ]] &&
+    [[ "$*" =~ \[.*\] ]] &&
       continue
     cmd=($*)
     [[ "$*" =~ ^exec.* ]] &&
       cmd+=("${cmdargs[@]}")
     if [ $VERBOSITY -ge 1 ] || bool $DRY_RUN; then
-      sed "$sed_script" <<<"${PROG}: ${cmd[@]}" >&2
+      print_command "${cmd[@]}" >&2
     fi
     bool $DRY_RUN &&
       continue
+    [ "$1" = "echo" ] &&
+    "${cmd[@]}" ||
     eval "${cmd[@]}"
   done
 } #}}}
@@ -333,24 +360,25 @@ dump_script() { #{{{
 remove_from_path() { #{{{
   case ":${PATH}:" in
     *":${1}:"*)
-      export PATH=${PATH//$(sed 's/\//\\\//g' <<<"${1}"):/} ;;
+      export PATH=${PATH//${1}:/} ;;
     *) ;;
   esac
 } #}}}
 
 stream_scripts() { #{{{
-  cat <<_EOF_ >"$FILTER"
+  IFS='' read -r -d '' jqscript <<_EOF_ || true
 include "nicy" ;
 stream_scripts_from_rules("$1"; $(nproc --all); $(ulimit -H -e))
 _EOF_
   jqargs=(
     --unbuffered
     -L "$NICY_DATADIR"
-    -f "$FILTER"
     --argjson "cachedb" "$(<"$DATABASE")"
+    "$jqscript"
   )
   [ -s "$NICY_IGNORE" ] && jqargs+=(--args $(<"$NICY_IGNORE"))
-  jq -nr "${jqargs[@]}" 2>&1 || error_exit 16 "unknown error with jq. Aborting."
+  jq -nr "${jqargs[@]}" 2>&1 ||
+    error_exit 16 "unknown error with jq. Aborting."
 } #}}}
 
 write_scripts() { #{{{
@@ -416,6 +444,62 @@ install_scripts() { #{{{
   fi
 } #}}}
 
+rawprocstat() { #{{{
+  cat /proc/[0-9]*/stat 2>/dev/null
+  return 0
+} #}}}
+
+awkprocstat() { #{{{
+  # Filter pids (default: processes own by user)
+  SLICE_SKIP=' cgres[3] !~ /user-[[:digit:]]+.slice/ '
+  UID_SKIP=" uid != $UID "
+  [ $# -gt 0 ] &&
+    case "$1" in
+      --system)
+        SLICE_SKIP=' cgres[2] !~ /system.slice/ '
+        unset UID_SKIP
+        ;;
+      --global)
+        unset UID_SKIP
+        ;;
+      --user)
+        ;;
+      --all)
+        unset SLICE_SKIP
+        unset UID_SKIP
+        ;;
+      *)
+        ;;
+    esac
+
+  awkscript="$(<"$NICY_DATADIR/procstat.awk")"
+  [ -v UID_SKIP ] &&
+    replace="if ($UID_SKIP) { next ; }" &&
+    awkscript=${awkscript//\#UID_SKIP/$replace}
+  [ -v SLICE_SKIP ] &&
+    replace="if ($SLICE_SKIP) { next ; }" &&
+    awkscript=${awkscript//\#SLICE_SKIP/$replace}
+
+  # Get processes stat and format
+  rawprocstat |sort -n |
+    LC_ALL=C awk "$awkscript" - 2>/dev/null |
+    tee "$RUNTIMEDIR/awkout"
+  return 0
+} #}}}
+
+manage_processes() { #{{{
+  # awkprocstat "$1"
+  awkprocstat "$1" |
+    jq -sr -L "$NICY_DATADIR" \
+      --argjson "cachedb" "$(<"$DATABASE")" \
+      --argjson "nproc" $(nproc --all) \
+      --argjson "max_nice" $(ulimit -H -e) \
+      --argjson "uid" $UID \
+      --arg "shell" "/bin/bash" \
+      'include "nicy"; manage_runtime' >"$COMMANDS" || true
+  return 0
+} #}}}
+
 do_lock() { #{{{
   count=3
   delay=1
@@ -446,75 +530,103 @@ check_missing_argument() { #{{{
 } #}}}
 
 parse_list_options() { #{{{
-OPTIND=1
-while getopts ":-:hf:" option; do #{{{
-  case $option in
-    -)
-      case "$OPTARG" in
-        help)
-          list_usage
-          exit 0
-          ;;
-        from=*)
-          dir=${OPTARG#from=}
-          dir=$(eval echo "$dir")
-          [ ! -d "$dir" ] &&
-            error_exit 1 "no such directory '$dir'"
-          case ":$(IFS=: ; echo "${search_dirs[*]}"):" in
-            *:$(realpath "$dir"):*) ;;
-            *) error_exit 1 "not a configured '$dir'" ;;
-          esac
-          LIST_DIRECTORY=$dir
-          ;;
-        -) break ;;
-        *) error_exit 1 "unknown option '--$OPTARG'." ;;
-      esac
-      ;;
-    h)
-      list_usage
-      exit 0
-      ;;
-    f)
-      check_missing_argument
-      dir=$(eval echo "$OPTARG")
-      [ ! -d "$dir" ] &&
-        error_exit 1 "no such directory '$dir'"
-      case ":$(IFS=: ; echo "${search_dirs[*]}"):" in
-        *:$(realpath "$dir"):*) ;;
-        *) error_exit 1 "not a configured '$dir'" ;;
-      esac
-      LIST_DIRECTORY=$dir
-      ;;
-    \?) error_exit 1 "unknown option '-$OPTARG'." ;;
-    :) error_exit 1 "missing argument for option '-$OPTARG'." ;;
-  esac
-done #}}}
-return $(($OPTIND - 1))
+  OPTIND=1
+  while getopts ":-:hf:" option; do #{{{
+    case $option in
+      -)
+        case "$OPTARG" in
+          help)
+            list_usage
+            exit 0
+            ;;
+          from=*)
+            dir=${OPTARG#from=}
+            dir=$(eval echo "$dir")
+            [ ! -d "$dir" ] &&
+              error_exit 1 "no such directory '$dir'"
+            case ":$(IFS=: ; echo "${search_dirs[*]}"):" in
+              *:$(realpath "$dir"):*) ;;
+              *) error_exit 1 "not a configured '$dir'" ;;
+            esac
+            LIST_DIRECTORY=$dir
+            ;;
+          -) break ;;
+          *) error_exit 1 "unknown option '--$OPTARG'." ;;
+        esac
+        ;;
+      h)
+        list_usage
+        exit 0
+        ;;
+      f)
+        check_missing_argument
+        dir=$(eval echo "$OPTARG")
+        [ ! -d "$dir" ] &&
+          error_exit 1 "no such directory '$dir'"
+        case ":$(IFS=: ; echo "${search_dirs[*]}"):" in
+          *:$(realpath "$dir"):*) ;;
+          *) error_exit 1 "not a configured '$dir'" ;;
+        esac
+        LIST_DIRECTORY=$dir
+        ;;
+      \?) error_exit 1 "unknown option '-$OPTARG'." ;;
+      :) error_exit 1 "missing argument for option '-$OPTARG'." ;;
+    esac
+  done #}}}
+  return $(($OPTIND - 1))
 } #}}}
 
 parse_install_options() { #{{{
-OPTIND=1
-while getopts ":-:h" option; do #{{{
-  case $option in
-    -)
-      case "$OPTARG" in
-        help)
-          install_usage
-          exit 0
-          ;;
-        -) break ;;
-        *) error_exit 1 "unknown option '--$OPTARG'." ;;
-      esac
-      ;;
-    h)
-      install_usage
-      exit 0
-      ;;
-    \?) error_exit 1 "unknown option '-$OPTARG'." ;;
-    :) error_exit 1 "missing argument for option '-$OPTARG'." ;;
-  esac
-done #}}}
-return $(($OPTIND - 1))
+  OPTIND=1
+  while getopts ":-:h" option; do #{{{
+    case $option in
+      -)
+        case "$OPTARG" in
+          help)
+            install_usage
+            exit 0
+            ;;
+          -) break ;;
+          *) error_exit 1 "unknown option '--$OPTARG'." ;;
+        esac
+        ;;
+      h)
+        install_usage
+        exit 0
+        ;;
+      \?) error_exit 1 "unknown option '-$OPTARG'." ;;
+      :) error_exit 1 "missing argument for option '-$OPTARG'." ;;
+    esac
+  done #}}}
+  return $(($OPTIND - 1))
+} #}}}
+
+parse_manage_options() { #{{{
+  OPTIND=1
+  while getopts ":-:hn" option; do #{{{
+    case $option in
+      -)
+        case "$OPTARG" in
+          help)
+            manage_usage
+            exit 0
+            ;;
+          dry-run) DRY_RUN=true ;;
+          user|system|global|all) DO_MANAGE="--$OPTARG" ;;
+          -) break ;;
+          *) error_exit 1 "unknown option '--$OPTARG'." ;;
+        esac
+        ;;
+      h)
+        manage_usage
+        exit 0
+        ;;
+      n) DRY_RUN=true ;;
+      \?) error_exit 1 "unknown option '-$OPTARG'." ;;
+      :) error_exit 1 "missing argument for option '-$OPTARG'." ;;
+    esac
+  done #}}}
+  return $(($OPTIND - 1))
 } #}}}
 
 parse_run_or_show_options() { #{{{
@@ -593,6 +705,10 @@ else
 fi
 
 case "$subcmd" in
+  version | -v | --version) #{{{
+    version
+    exit 0
+    ;; #}}}
   help | -h | --help) #{{{
     usage
     exit 0
@@ -631,6 +747,8 @@ case "$subcmd" in
         *) error_exit 1 "not a valid category '$1'." ;;
       esac
     fi
+    # Rebuild the json cache files
+    check_or_build_cache
     [ -z "$LIST_DIRECTORY" ] &&
       list "$LIST_CATEGORY" "${search_dirs[@]}" ||
       list "$LIST_CATEGORY" "$LIST_DIRECTORY"
@@ -653,25 +771,35 @@ case "$subcmd" in
     echo "All done."
     exit 0
     ;; #}}}
+  manage)
+    parse_manage_options "$@" || shift $?
+    if [[ "$DO_MANAGE" =~ --(system|global|all) ]]; then
+      [ $UID -eq 0 ] ||
+        error_exit 1 "not available without root privileges: '$DO_MANAGE'."
+    fi
+    ;;
   *)
     usage
     error_exit 1 "unknown subcommand '$subcmd'."
     ;;
 esac
 
-if [ $# -gt 0 ]; then
-  which "$1" &>/dev/null ||
-    error_exit 1 "$1 not found"
-else
-  usage
-  error_exit 1 "missing command."
-fi
+case "$subcmd" in
+  show|run)
+    if [ $# -gt 0 ]; then
+      which "$1" &>/dev/null ||
+        error_exit 1 "$1 not found"
+      name=$1
+      shift
+      # Save the command arguments, if any, for later use
+      declare -ga cmdargs=("$@")
+    else
+      usage
+      error_exit 1 "missing command."
+    fi
+    ;;
+esac
 
-name=$1
-shift
-
-# Save the command arguments, if any, for later use
-declare -ga cmdargs=("$@")
 
 # Lock the runtime dir
 do_lock "$RUNTIMEDIR"
@@ -688,6 +816,7 @@ check_or_build_cache
 # Get commands
 case "$subcmd" in
   run | show) get_cmdlines "$subcmd" "$name" ;;
+  manage) manage_processes "$DO_MANAGE" ;;
   *) error_exit 1 ;;
 esac
 
@@ -696,10 +825,15 @@ mapfile -t cmdlines <"$COMMANDS"
 # Unlock the runtime dir
 do_unlock "$RUNTIMEDIR"
 
-if [ "$subcmd" = "show" ]; then
-  dump_script "${cmdlines[@]:1}"
-  exit $?
-fi
-
-run_commands "${cmdlines[@]:1}"
+case "$subcmd" in
+  show)
+    dump_script "${cmdlines[@]:1}"
+    ;;
+  run)
+    run_commands "${cmdlines[@]:1}"
+    ;;
+  manage)
+    run_commands "${cmdlines[@]}"
+    ;;
+esac
 exit $?

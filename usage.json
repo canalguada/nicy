@@ -1,38 +1,55 @@
 {
   "program": "nicy",
-  "version": "0.1.0",
-  "description": "Set the execution environment and the available resources.",
+  "version": "0.1.1",
+  "description": "Set the execution environment and configure the resources that spawned and running processes are allowed to share.",
   "usage": {
     "run": "run [OPTIONS]... COMMAND [ARGUMENTS]...",
     "show": "show [OPTIONS]... COMMAND",
     "list": "list [OPTIONS] CATEGORY",
     "rebuild": "rebuild",
-    "install": "install [OPTIONS] [SHELL]"
+    "install": "install [SHELL [SCRIPT_PATH]]",
+    "manage": "manage [OPTIONS]"
   },
   "text": {
     "run": "Run the COMMAND in a pre-set execution environment.",
     "show": "Show the effective script for the given COMMAND and OPTIONS.",
     "list": "List the objects from this CATEGORY, removing all duplicates.",
     "rebuild": "Rebuild the json cache and exit.",
-    "install": "Install scripts, using SHELL if any."
+    "install": "Install scripts, using SHELL if any.",
+    "manage": "Apply available presets, managing the running processes."
   },
   "options": {
-    "run": [ "-n, --dry-run        Display commands but do not run them" ],
-    "show": [
-      "-q, --quiet          Suppress additional output",
-      "-v, --verbose        Display which command is launched",
-      "-p, --preset=PRESET  Apply this PRESET",
-      "-d, --default        Like '--preset=default'",
-      "-z, --cgroup-only    Like '--preset=cgroup-only'",
-      "-c, --cgroup=CGROUP  Run inside this CGROUP",
-      "    --cpu<QUOTA>     Like '--cgroup=cpu<QUOTA>'",
-      "-m, --managed        Run inside a scope, required or not",
-      "-u, --force-cgroup   Run inside a matching cgroup, if any"
+    "run": [
+      "-n, --dry-run        display commands but do not run them"
     ],
-    "list": [ "-f, --from=DIRECTORY List only objects from this DIRECTORY" ],
+    "show": [
+      "-q, --quiet          suppress additional output",
+      "-v, --verbose        display which command is launched",
+      "-p, --preset=PRESET  apply this PRESET",
+      "-d, --default        like '--preset=default'",
+      "-z, --cgroup-only    like '--preset=cgroup-only'",
+      "-c, --cgroup=CGROUP  run inside this CGROUP",
+      "    --cpu<QUOTA>     like '--cgroup=cpu<QUOTA>'",
+      "-m, --managed        always run inside a scope",
+      "-u, --force-cgroup   run inside a matching cgroup, if any"
+    ],
+    "list": [
+      "-f, --from=DIRECTORY List only objects from this DIRECTORY"
+    ],
     "rebuild": [],
     "install": [],
-    "help": [ "-h, --help           Display this help and exit" ]
+    "manage": [
+      "    --user           inside the slice of the current user",
+      "    --system         inside the system slice",
+      "    --global         inside the global user slice",
+      "    --all            inside either system or global user slice"
+    ],
+    "help": [
+      "-h, --help           display this help and exit"
+    ],
+    "version": [
+      "-v, --version        show the program version and exit"
+    ]
   },
   "details":{
     "run": [
@@ -47,7 +64,11 @@
     ],
     "install": [
       "The SHELL argument can be a path to a supported shell (sh, dash, bash, zsh). Default value is /bin/sh.",
-      "Only installs scripts for rules matching a command found."
+      "The scripts are installed, when a specific rule is available, in SCRIPT_PATH, if given. Default value is $HOME/bin/nicy."
+    ],
+    "manage": [
+      "The processes are managed when a specific rule is available.",
+      "Root credentials are mandatory with --system, --global and --all options."
     ]
   }
 }
