@@ -2,7 +2,7 @@
 ## About
 Set the execution environment and configure the resources that spawned and running processes are allowed to share.
 ## Why
-My legacy low-end hardware quickly turns nasty, running hot then shutting down, when launching too many or modern "resource hungry" softwares. But controlling the resources that some of them request help that hardware to be servieable again.
+My legacy low-end hardware quickly turns nasty, running hot then shutting down, when launching too many or modern "resource hungry" softwares. But controlling the resources that some of them request help that hardware to be serviceable again.
 
 I used to install [Ananicy](https://github.com/Nefelim4ag/Ananicy), an auto nice daemon, with community rules support, that relies too on the Linux Control Groups ([Cgroups](https://en.wikipedia.org/wiki/Cgroups)).
 
@@ -10,12 +10,12 @@ I write nicy because I need to control the available resources per program accor
 
 ## Usage
 ```
-$ nicy run --dry-run nvim-qt
-nicy: sudo renice -n -3 -p 19696
-nicy: systemctl --user start nicy-cpu66.slice
-nicy: systemctl --user --runtime set-property nicy-cpu66.slice CPUQuota=66%
-nicy: exec systemd-run --user -G -d --no-ask-password --quiet --unit=nvim-qt-19696 --scope --slice=nicy-cpu66.slice -E 'SHELL=/bin/bash -l' /usr/bin/nvim-qt --nofork --nvim /usr/bin/nvim
-
+$ nicy run --dry-run go get github.com/itchyny/gojq/cmd/gojq
+nicy: run: systemctl --user start nicy-cpu16.slice
+nicy: run: systemctl --user --runtime set-property nicy-cpu16.slice CPUQuota=16%
+nicy: run: exec systemd-run --user -G -d --no-ask-password --quiet --unit=go-20156 --scope --slice=nicy-cpu16.slice --nice=19 chrt --idle 0 ionice -c 3 /usr/bin/go get github.com/itchyny/gojq/cmd/gojq
+```
+```
 $ nicy show nvim-qt
 #!/bin/sh
 [ $(id -u) -ne 0 ] && user_or_system=--user || user_or_system=
@@ -24,25 +24,48 @@ $SUDO renice -n -3 -p $$ >/dev/null 2>&1
 systemctl ${user_or_system} start nicy-cpu66.slice >/dev/null 2>&1
 systemctl ${user_or_system} --runtime set-property nicy-cpu66.slice CPUQuota=66% >/dev/null 2>&1
 exec systemd-run ${user_or_system} -G -d --no-ask-password --quiet --unit=nvim-qt-$$ --scope --slice=nicy-cpu66.slice -E 'SHELL=/bin/bash -l' /usr/bin/nvim-qt --nofork --nvim /usr/bin/nvim "$@"
-
+```
+```
+# nicy manage --dry-run --system
+nicy: manage: adjusting comm:cupsd pgrp:460 cgroup:cups.service pids:460                             
+nicy: manage: renice -n 19 -g 460
+nicy: manage: ionice -c 3 -P 460
+nicy: manage: chrt --idle -a -p 0 460
+nicy: manage: systemctl --runtime set-property cups.service CPUQuota=16%
+nicy: manage: adjusting comm:lightdm pgrp:540 cgroup:lightdm.service pids:540
+nicy: manage: ionice -c 1 -n 4 -P 540
+nicy: manage: adjusting comm:cups-browsed pgrp:550 cgroup:cups-browsed.service pids:550
+nicy: manage: renice -n 19 -g 550
+nicy: manage: ionice -c 3 -P 550
+nicy: manage: chrt --idle -a -p 0 550
+nicy: manage: systemctl --runtime set-property cups-browsed.service CPUQuota=16%
+nicy: manage: adjusting comm:Xorg pgrp:580 cgroup:lightdm.service pids:580
+nicy: manage: renice -n -10 -g 580
+nicy: manage: ionice -c 1 -n 1 -P 580
+nicy: manage: adjusting comm:apache2 pgrp:974 cgroup:apache2.service pids:974
+nicy: manage: renice -n 19 -g 974
+nicy: manage: ionice -c 2 -n 7 -P 974
+nicy: manage: systemctl --runtime set-property apache2.service CPUQuota=66%
+```
+```
 $ nicy --help
-nicy version 0.1.1
+nicy version 0.1.2
 
 Set the execution environment and configure the resources that spawned
 and running processes are allowed to share.
 
 Usage:
-  nicy run [OPTIONS]... COMMAND [ARGUMENTS]...
+  nicy run [OPTION]... COMMAND [ARGUMENT]...
     Run the COMMAND in a pre-set execution environment.
-  nicy show [OPTIONS]... COMMAND
-    Show the effective script for the given COMMAND and OPTIONS.
-  nicy list [OPTIONS] CATEGORY
+  nicy show [OPTION]... COMMAND
+    Show the effective script for these COMMAND and OPTIONS, if any.
+  nicy list [OPTION] CATEGORY
     List the objects from this CATEGORY, removing all duplicates.
-  nicy install [SHELL [SCRIPT_PATH]]
-    Install scripts, using SHELL if any.
-  nicy rebuild
+  nicy install [OPTION]...
+    Install scripts.
+  nicy rebuild [OPTION]
     Rebuild the json cache and exit.
-  nicy manage [OPTIONS]
+  nicy manage [OPTION]...
     Apply available presets, managing the running processes.
 
 Common options:
@@ -64,13 +87,21 @@ Run only options:
   -n, --dry-run        display commands but do not run them
 
 List options:
-  -f, --from=DIRECTORY list only objects from this DIRECTORY
+  -f, --from=CONFDIR   list only objects from CONFDIR directory
+
+Install options:
+      --shell=SHELL    generate script for SHELL
+      --path=DESTDIR   install inside DESTDIR
+
+Rebuild options:
+      --force          ignore existing files in cache
 
 Manage options:
       --user           inside the slice of the current user
       --system         inside the system slice
       --global         inside the global user slice
       --all            inside either system or global user slice
+  -n, --dry-run        display commands but do not run them
 
 The PRESET argument can be: 'auto' to apply the specific preset for
 the command, its rule, if any; 'cgroup-only' to apply only the cgroup
@@ -85,19 +116,20 @@ a percentage relative to the total CPU time available on all cores.
 The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching
 the extensions of configuration files.
 
-The DIRECTORY argument can be a path from NICY_SEARCH_DIRS setting. When
-filtering per DIRECTORY, no duplicate is removed taking into account
-the priority between directories.
+The CONFDIR argument can be one out of NICY_SEARCH_DIRS directories. When
+filtering per CONFDIR, no duplicate is removed taking into account the
+priority between directories.
 
 The SHELL argument can be a path to a supported shell (sh, dash, bash,
 zsh). Default value is /bin/sh.
 
-The scripts are installed, when a specific rule is available, in
-SCRIPT_PATH, if given. Default value is $HOME/bin/nicy.
+The scripts are installed, when a specific rule is available, in DESTDIR,
+if given. Default value is $HOME/bin/nicy, or /usr/local/bin/nicy for
+system (root) user.
 
 The processes are managed when a specific rule is available.
 
-Root credentials are mandatory with --system, --global and --all options.
+The --system, --global and --all options require root credentials.
 
 ```
 
@@ -105,15 +137,11 @@ Root credentials are mandatory with --system, --global and --all options.
 * [systemd](https://systemd.io/) and [systemd-run](https://www.freedesktop.org/software/systemd/man/systemd-run.html)
 * [jq](https://stedolan.github.io/jq/), a lightweight and flexible command-line JSON processor
 
-Most of cgroup settings are supported only with the unified control group hierarchy, the new version of kernel control group interface, see [Control Groups v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html). 
+Most of cgroup settings are supported only with the unified control group hierarchy, the new version of kernel control group interface, see [Control Groups v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
 ## Installation
-Install in /usr/local.
+Install in /usr/local: `$ sudo make install`
+Install in /usr: `$ sudo make prefix=/usr install`
 
-`$ sudo make install`
-
-Install in /usr.
-
-`$ sudo make prefix=/usr install`
 ## Configuration
 With default configuration, nicy looks for files in the following directories, in this order of preference :
 
@@ -164,9 +192,9 @@ The .cgroups file lists in json format such sets of parameters, or limits, one f
 
 `{ "cgroup": "cpu66", "CPUQuota": "66%" }`
 
- defines a **cpu66** cgroup, where the bound processes will share at maximum **66% of total CPU time available on ALL CORES** as per **CPUQuota** limit.
+ defines a **cpu66** **cgroup**, where the bound processes will share at maximum **66% of total CPU time available on ALL CORES** as per **CPUQuota** limit.
 
-The *cgroup* pair is mandatory. All other key-value pairs are optional and will be ignored if the key doesn't match the following parameters and limits :
+The **cgroup** pair is mandatory. All other key-value pairs are optional and will be ignored if the key doesn't match the following parameters and limits :
 
 - **CPUQuota**. Assign the specified CPU time quota to the processes executed. Takes a percentage value, suffixed with "%" or not. The percentage specifies how much CPU time the unit shall get at maximum, relative to the total CPU time available on ALL CORES.
 - **MemoryHigh**. Specify the throttling limit on memory usage of the executed processes in this unit. Memory usage may go above the limit if unavoidable, but the processes are heavily slowed down and memory is taken away aggressively in such cases. This is the main mechanism to control memory usage of a unit. Takes a memory size in bytes. If the value is suffixed with K, M, G or T, the specified memory size is parsed as Kilobytes, Megabytes, Gigabytes, or Terabytes (with the base 1024), respectively. Alternatively, a percentage value may be specified, suffixed with "%" or not, which is taken relative to the installed physical memory on the system. If assigned the special value "infinity", no memory throttling is applied. **Requires the unified control group hierarchy.**
@@ -179,7 +207,7 @@ Nicy relies on [systemd slice units](https://www.freedesktop.org/software/system
 ### Types
 Writing a full rule for each program would turn boring.
 
-The .types file groups sets of properties in order to define classes of programs, or types. A **type** can be seen as a generic **preset**. For instance, whether you run `nicy chromium` or `nicy firefox` you will probably set an higher scheduling priority for all processes, adjust the OOM score, and limit the available CPU time. Instead of writing twice, or more times, the same rule repeating almost the same properties, one create a single **type** **Web-Browser** like this one.
+The .types file groups sets of properties in order to define classes of programs, or types. A **type** can be seen as a generic **preset**. For instance, whether you run `nicy chromium` or `nicy firefox` you will probably set an higher scheduling priority for all processes, adjust the OOM score, and limit the available CPU time. Instead of writing twice, or more times, the same rule repeating almost the same properties, one create a single type **Web-Browser** like this one.
 
 `{ "type": "Web-Browser", "nice": -3, "oom_score_adj": 1000, "CPUQuota": "66%" }`
 
@@ -187,7 +215,7 @@ Or better, since many programs can run inside the same cgroup, like below :
 
 `{ "type": "Web-Browser", "nice": -3, "oom_score_adj": 1000, "cgroup": "cpu66" }`
 
-The *type* pair is mandatory. All other key-value pairs are optional and will be ignored if the key doesn't match the previously defined or the following keys :
+The **type** pair is mandatory. All other key-value pairs are optional and will be ignored if the key doesn't match the previously defined or the following keys :
 
 - **nice** ([renice(1)](https://manpages.debian.org/buster/bsdutils/renice.1.en.html)). Adjusted niceness, which affects process scheduling. Niceness values range from -20 (most favorable to the process) to 19 (least favorable to the process) (**root-credentials required** for negative niceness with NICY_SHELL default value).
 - **sched** ([sched(7)](https://manpages.debian.org/buster/manpages/sched.7.en.html) and [chrt(1)](https://manpages.debian.org/buster/util-linux/chrt.1.en.html)). Available policies are :
@@ -207,7 +235,7 @@ The *type* pair is mandatory. All other key-value pairs are optional and will be
 
 See also comments in the `00-types.types` file.
 ### Rules
-Once the available cgroups and types have been set, subdirectories can be filled with some .rules files. A **rule** can be seen as a specific **preset** for a unique given program. For instance :
+Once the available cgroups and types have been set, subdirectories can be filled with some .rules files. A **rule** can be seen as a specific **preset** for a unique program. For instance :
 ```
 { "name": "chromium", "type": "Web-Browser" }
 { "name": "firefox", "type": "Web-Browser" }
@@ -216,9 +244,12 @@ More properties can be added to rules. For instance, some random browser could q
 ```
 { "name": "cheap-browser", "type": "Web-Browser", "MemoryHigh": "60%", "MemoryMax": "75%" }
 ```
-The *name* pair is mandatory. All other key-value pairs are optional and will be ignored if the key doesn't match neither the keys defined for .cgroups and .types files, nor *env* and *cmdargs* keys, whose pairs allow respectively to specify shell environment variables and arguments passed to the program.
+The **name** pair is mandatory. All other key-value pairs are optional and will be ignored if the key doesn't match neither the keys defined for .cgroups and .types files,, nor:
+- **env**. Allow to specify shell environment variables.
+- **cmdargs**. Allow to pass arguments to the program.
 
-With the configuration above, the command `nicy run cheap-browser` replaces the script below :
+## Subcommands
+After adding a new rule and using the **rebuild** subcommand to refresh the cache, with the configuration above, **nicy run cheap-browser** roughly executes the script below, generated with the **show** subcommand :
 ```
 $ nicy show cheap-browser
 #!/bin/sh
@@ -229,13 +260,17 @@ systemctl ${user_or_system} start nicy-cpu66.slice >/dev/null 2>&1
 systemctl ${user_or_system} --runtime set-property nicy-cpu66.slice CPUQuota=66% >/dev/null 2>&1
 exec systemd-run ${user_or_system} -G -d --no-ask-password --quiet --unit=cheap-browser-$$ --scope --slice=nicy-cpu66.slice -p MemoryHigh=60% -p MemoryMax=75% choom -n 1000 -- /usr/bin/cheap-browser "$@"
 ```
-One can easily substitute this script to the command `/usr/bin/cheap-browser`. For instance, if `$HOME/bin/nicy` folder have been added at the beginning of PATH environment variable, one can copy there the script into a new `cheap-browser` executable file and making it available as a replacement for the initial `nicy run cheap-browser` command.
+With `$HOME/bin/nicy` added at the beginning of his PATH environment variable, one user can copy there this script, making it available as a replacement for the initial `cheap-browser` command .
 
-With `install` subcommand, after removing the duplicates and if matching an existing command, scripts for all the specific rules are generated and installed in configured folder.
+With **install** subcommand, after removing the duplicates and if matching an existing command, scripts for all the specific rules are generated and installed in configured directory.
+```
+$ ls $HOME/bin/nicy
+cheap-browser.nicy
+chromium.nicy
+firefox.nicy
+```
 
-See also comments in the `environment` file.
-
-With `manage` subcommand, the running processes are scanned for missing properties to apply, when matching existing specific rules. For instance, with `pcmanfm-qt` file manager :
+With **manage** subcommand, the running processes are scanned looking for properties to apply, in order to match existing specific rules. For instance, after launching `pcmanfm-qt` file manager and using the **list** subcommand to check existing rule and type :
 ```
 $ /usr/bin/pcmanfm-qt &>/dev/null &
 [1] 2686
@@ -243,15 +278,21 @@ $ nicy list rules |grep pcmanfm-qt
 pcmanfm-qt     {"name":"pcmanfm-qt","type":"File-Manager"}
 $ nicy list types |grep File-Manager
 File-Manager   {"type":"File-Manager","nice":-3,"ioclass":"best-effort","cgroup":"cpu33"}
-$ nicy manage -n --user
-nicy: manage: echo ── 'pcmanfm-qt (2686) session-3.scope (2686)'
+$ nicy manage --dry-run --user
+nicy: manage: adjusting comm:pcmanfm-qt pgrp:2686 cgroup:session-3.scope pids:2686
 nicy: manage: sudo renice -n -3 -g 2686
-nicy: manage: ionice -c 2 -p 2686
+nicy: manage: ionice -c 2 -P 2686
 nicy: manage: systemctl --user start nicy-cpu33.slice
 nicy: manage: systemctl --user --runtime set-property nicy-cpu33.slice CPUQuota=33%
-nicy: manage: busctl call --user org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit ssa(sv)a(sa(sv)) pcmanfm-qt-2686.scope fail 2 PIDs au 1 2686 Slice s nicy-cpu33.slice 0
-
+nicy: manage: busctl call --quiet --user org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit ssa(sv)a(sa(sv)) pcmanfm-qt-2686.scope fail 2 PIDs au 1 2686 Slice s nicy-cpu33.slice 0
+$ systemd-cgls /user.slice/user-1001.slice/user@1001.service/nicy.slice
+Control group /user.slice/user-1001.slice/user@1001.service/nicy.slice:
+└─nicy-cpu33.slice 
+  └─pcmanfm-qt-2686.scope 
+    └─2686 /usr/bin/pcmanfm-qt
 ```
+
+See also comments in the `environment` file.
 
 ## TODO
 - Write a man page.

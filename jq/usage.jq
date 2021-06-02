@@ -1,4 +1,4 @@
-module "usage" ;
+module { "name": "usage" };
 
 def dump_options: map("  \(.)") | .[] ;
 
@@ -31,6 +31,10 @@ def main:
   (.options.run | dump_options),
   "\nList options:",
   (.options.list | dump_options),
+  "\nInstall options:",
+  (.options.install | dump_options),
+  "\nRebuild options:",
+  (.options.rebuild | dump_options),
   "\nManage options:",
   (.options.manage | dump_options),
   "",
@@ -46,7 +50,6 @@ def run:
   "    \(.text.run)",
   "\nRun options:",
   (.options.show | dump_options),
-  "",
   (.options.run | dump_options),
   "",
   (.options.help | dump_options),
@@ -86,6 +89,8 @@ def install:
   "  \(.program) \(.usage.install)",
   "    \(.text.install)",
   "\nInstall options:",
+  (.options.install | dump_options),
+  "",
   (.options.help | dump_options),
   (.options.version | dump_options),
   "",
@@ -97,6 +102,8 @@ def rebuild:
   "  \(.program) \(.usage.rebuild)",
   "    \(.text.rebuild)",
   "\nRebuild options:",
+  (.options.rebuild | dump_options),
+  "",
   (.options.help | dump_options),
   (.options.version | dump_options),
   "" ;

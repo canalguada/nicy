@@ -1,21 +1,21 @@
 {
   "program": "nicy",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Set the execution environment and configure the resources that spawned and running processes are allowed to share.",
   "usage": {
-    "run": "run [OPTIONS]... COMMAND [ARGUMENTS]...",
-    "show": "show [OPTIONS]... COMMAND",
-    "list": "list [OPTIONS] CATEGORY",
-    "rebuild": "rebuild",
-    "install": "install [SHELL [SCRIPT_PATH]]",
-    "manage": "manage [OPTIONS]"
+    "run": "run [OPTION]... COMMAND [ARGUMENT]...",
+    "show": "show [OPTION]... COMMAND",
+    "list": "list [OPTION] CATEGORY",
+    "rebuild": "rebuild [OPTION]",
+    "install": "install [OPTION]...",
+    "manage": "manage [OPTION]..."
   },
   "text": {
     "run": "Run the COMMAND in a pre-set execution environment.",
-    "show": "Show the effective script for the given COMMAND and OPTIONS.",
+    "show": "Show the effective script for these COMMAND and OPTIONS, if any.",
     "list": "List the objects from this CATEGORY, removing all duplicates.",
     "rebuild": "Rebuild the json cache and exit.",
-    "install": "Install scripts, using SHELL if any.",
+    "install": "Install scripts.",
     "manage": "Apply available presets, managing the running processes."
   },
   "options": {
@@ -34,15 +34,21 @@
       "-u, --force-cgroup   run inside a matching cgroup, if any"
     ],
     "list": [
-      "-f, --from=DIRECTORY List only objects from this DIRECTORY"
+      "-f, --from=CONFDIR   list only objects from CONFDIR directory"
     ],
-    "rebuild": [],
-    "install": [],
+    "rebuild": [
+      "    --force          ignore existing files in cache"
+    ],
+    "install": [
+      "    --shell=SHELL    generate script for SHELL",
+      "    --path=DESTDIR   install inside DESTDIR"
+    ],
     "manage": [
       "    --user           inside the slice of the current user",
       "    --system         inside the system slice",
       "    --global         inside the global user slice",
-      "    --all            inside either system or global user slice"
+      "    --all            inside either system or global user slice",
+      "-n, --dry-run        display commands but do not run them"
     ],
     "help": [
       "-h, --help           display this help and exit"
@@ -60,15 +66,15 @@
     "show": [],
     "list": [
       "The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching the extensions of configuration files.",
-      "The DIRECTORY argument can be a path from NICY_SEARCH_DIRS setting. When filtering per DIRECTORY, no duplicate is removed taking into account the priority between directories."
+      "The CONFDIR argument can be one out of NICY_SEARCH_DIRS directories. When filtering per CONFDIR, no duplicate is removed taking into account the priority between directories."
     ],
     "install": [
       "The SHELL argument can be a path to a supported shell (sh, dash, bash, zsh). Default value is /bin/sh.",
-      "The scripts are installed, when a specific rule is available, in SCRIPT_PATH, if given. Default value is $HOME/bin/nicy."
+      "The scripts are installed, when a specific rule is available, in DESTDIR, if given. Default value is $HOME/bin/nicy, or /usr/local/bin/nicy for system (root) user."
     ],
     "manage": [
       "The processes are managed when a specific rule is available.",
-      "Root credentials are mandatory with --system, --global and --all options."
+      "The --system, --global and --all options require root credentials."
     ]
   }
 }

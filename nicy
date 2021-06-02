@@ -10,7 +10,7 @@ PROG="nicy"
 
 # Utils {{{
 error_exit() { #{{{
-  echo -e "$PROG: error: ${2:-'unknown error'}" >&2
+  echo "$PROG: error: ${2:-'unknown error'}" >&2
   exit "${1:-1}"
 } #}}}
 
@@ -30,7 +30,8 @@ true_or_false() { #{{{
 } #}}}
 #}}}
 
-# Environment variables {{{
+# Environment variables
+# ===================== {{{
 # The user 's configuration files always get the highest priority.
 for dir in "/usr/local/etc" "/etc" "${XDG_CONFIG_HOME:-$HOME/.config}"; do
   [ ! -f "$dir/$PROG/environment" ] || . "$dir/$PROG/environment"
@@ -41,6 +42,8 @@ done
 
 [ -v NICY_DATADIR ] ||
   NICY_DATADIR="/usr/local/share/nicy"
+
+LIBDIR="${NICY_DATADIR}/jq"
 
 [ -v NICY_VERBOSE ] &&
   NICY_VERBOSE=$(true_or_false "$NICY_VERBOSE") ||
@@ -59,55 +62,65 @@ supported_shell_or_die() { #{{{
     grep -q "$1" /etc/shells; then
     echo "$1"
   else
-    error_exit 1 "not a supported shell : $1"
+    echo "${PROG}: not supported : $1" >&2
+    return 1
   fi
 } #}}}
 
-[ -v NICY_SHELL ] &&
-  SCRIPT_SHELL=$(supported_shell_or_die "$NICY_SHELL") ||
-  SCRIPT_SHELL=/bin/sh
+[ -v NICY_SHELL ] && supported_shell_or_die "$NICY_SHELL" &>/dev/null ||
+  NICY_SHELL="/bin/sh"
+SCRIPT_SHELL=$NICY_SHELL
+
+[ -v NICY_SCRIPTS_PATH ] || {
+  [ $UID -ne 0 ] &&
+    NICY_SCRIPTS_PATH="$HOME/bin/nicy" ||
+    NICY_SCRIPTS_PATH="/usr/local/bin/nicy"
+}
+SCRIPTS_PATH=$NICY_SCRIPTS_PATH
 
 NICY_SUDO=${NICY_SUDO:-sudo}
 
 # Don't export SUDO when commands are not allowed by policy
+# TODO: Management of privileges per command ?
 if [ $UID -ne 0 ] &&
   sudo -l renice &>/dev/null &&
-  sudo -l schedtool &>/dev/null &&
-  sudo -l ionice &>/dev/null; then
+  sudo -l chrt &>/dev/null; then
   declare -x SUDO=${NICY_SUDO} || true
 else
   declare -x SUDO=
 fi
 [ -v SUDO ] || declare -x SUDO=":"
+
+JQ_PATH=${JQ_PATH:-$(command -v jq)}
+command -v "$JQ_PATH" &>/dev/null ||
+  error_exit 1 "$(command -V "$JQ_PATH" 2>&1)"
+
+jq() { $JQ_PATH -M "$@"; }
 #}}}
 
-command -v jq &>/dev/null ||
-  error_exit 1 "$(command -V jq 2>&1)"
-
-JQ_PATH=$(command -v jq)
-jq() { $JQ_PATH -M "$@"; }
-
-# Usage {{{
+# Usage
+# ===== {{{
 
 # WIDTH=$COLUMNS
 WIDTH=74
 
 usage() { #{{{
-  jqscript='include "usage"; main'
-  jq -r -L "$NICY_DATADIR" "$jqscript" "${NICY_DATADIR}/usage.json" |
+  jq -r -L "$LIBDIR" \
+    'include "usage"; main' "${NICY_DATADIR}/usage.json" |
     fmt -s -w $WIDTH
 } #}}}
 
 jq_usage() { #{{{
   jqfunction="${FUNCNAME[1]%_usage}"
   jqscript=$(printf 'include "usage"; %s' "$jqfunction")
-  jq -r -L "$NICY_DATADIR" "$jqscript" "${NICY_DATADIR}/usage.json" |
+  jq -r -L "$LIBDIR" \
+    "$jqscript" "${NICY_DATADIR}/usage.json" |
     fmt -s -w $WIDTH
 } #}}}
 
 version() { #{{{
-  jqscript='include "usage"; version'
-  jq -r -L "$NICY_DATADIR" "$jqscript" "${NICY_DATADIR}/usage.json" |
+  jq -r -L "$LIBDIR" \
+    'include "usage"; version' "${NICY_DATADIR}/usage.json" |
     fmt -s -w $WIDTH
 } #}}}
 
@@ -119,7 +132,8 @@ rebuild_usage() { jq_usage ; }
 manage_usage() { jq_usage ; }
 #}}}
 
-# Runtime parameters {{{
+# Runtime parameters
+# ================== {{{
 QUIET=false
 bool "$NICY_VERBOSE" &&
   VERBOSITY=1 ||
@@ -131,13 +145,21 @@ ALWAYS_USE_SCOPE=false
 DRY_RUN=false
 LIST_CATEGORY=
 LIST_DIRECTORY=
-DO_MANAGE=
+[ $UID -ne 0 ] &&
+  DO_MANAGE=--user ||
+  DO_MANAGE=--system
+FORCE_REBUILD=false
 #}}}
 
-# Global variables {{{
+# Global variables
+# ================ {{{
 RUNTIMEDIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/$PROG"
 [ -d "$RUNTIMEDIR" ] || mkdir -p "$RUNTIMEDIR"
-CACHEDIR="${XDG_CACHE_HOME:-$HOME/.cache}/${PROG}"
+if [ $UID -ne 0 ]; then
+  CACHEDIR="${XDG_CACHE_HOME:-$HOME/.cache}/${PROG}"
+else
+  CACHEDIR="/var/cache/${PROG}"
+fi
 [ -d "$CACHEDIR" ] || mkdir -p "$CACHEDIR"
 
 CGROUPS="$CACHEDIR/cgroups"
@@ -147,6 +169,10 @@ DATABASE="$CACHEDIR/database"
 #}}}
 
 # Functions
+# =========
+
+# Rebuild
+# -------
 
 dump_content() { #{{{
   [ $# -lt 2 ] && return 1
@@ -169,45 +195,30 @@ dump_content() { #{{{
   done
 } #}}}
 
-list() { #{{{
-  [ $# -lt 2 ] && return 1
-  kind=${1,,}
-  kind=${kind%s}
-  volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
-  shift
-  jqscript=$(printf 'include "nicy" ; dump("%s")' "$kind")
-  jq -nr -L "$NICY_DATADIR" "$jqscript" \
-    --argjson cachedb "$(<"$DATABASE")" \
-    --args "$@" \
-    |& tee "$volatile" \
-    | column -t -s $'\t' | tail -n +2
-} #}}}
-
 dump_content_file_cache() { #{{{
   kind=${1,,}
   kind=${kind%s}
   volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
-  jqscript=$(printf 'include "nicy" ; make_cache("%s")' "$kind")
   for confdir in "${search_dirs[@]}"; do
-    dump_content "$kind" "$confdir" | jq -sc -L "$NICY_DATADIR" "$jqscript"
+    dump_content "$kind" "$confdir" |
+      jq -sc -L "$LIBDIR" \
+        --argjson "cachedb" '{}' \
+        --arg kind "$kind" \
+        'include "rebuild"; make_cache'
   done |& tee "$volatile"
 } #}}}
 
 build_json_cache() { #{{{
-  jqargs=()
-  pairs=($(printf '"%s":%s' "date" "$(date +"%s")"))
-  for kind in "cgroup" "type" "rule"; do
-    pairs+=($(printf '"%ss":$%ss' "$kind" "$kind"))
-    var="${kind^^}S"
-    jqargs+=(--slurpfile "${kind}s" "${!var}")
-  done
-  jqscript='{'"$( IFS=',' && echo "${pairs[*]}")"'}'
-  jq -n "${jqargs[@]}" "$jqscript" >"$DATABASE"
+  jq -n \
+    --slurpfile cgroups "$CGROUPS" \
+    --slurpfile types "$TYPES" \
+    --slurpfile rules "$RULES" \
+    --arg "date" "$(date +"%s")" \
+    '{ "date": $date, "cgroups": $cgroups, "types": $types, "rules": $rules }'
 } #}}}
 
 check_or_build_cache() { #{{{
-  # TODO: Provide environment variable to always rebuild cache
-  do_rebuild=${1:-no}
+  do_rebuild=${1:-false}
   for kind in "cgroup" "type" "rule"; do
     var="${kind^^}S"
     dest=${!var}
@@ -216,9 +227,30 @@ check_or_build_cache() { #{{{
     fi
   done
   if [ ! -f "$DATABASE" ] || bool $do_rebuild; then
-    build_json_cache
+    build_json_cache >"$DATABASE"
   fi
 } #}}}
+
+# List
+# ----
+
+list() { #{{{
+  [ $# -lt 2 ] && return 1
+  kind=${1,,}
+  kind=${kind%s}
+  volatile="$RUNTIMEDIR/${FUNCNAME[0]}-$kind"
+  shift
+  printf '"%s"\n' "$@" |
+    jq -sr -L "$LIBDIR" \
+      --argjson cachedb "$(<"$DATABASE")" \
+      --arg kind "$kind" \
+      'include "list"; list' |&
+        tee "$volatile" |
+          column -t -s $'\t' | tail -n +2
+} #}}}
+
+# Run / Show
+# ----------
 
 find_cmd_path() { #{{{
   name=$(basename "$1")
@@ -229,7 +261,7 @@ find_cmd_path() { #{{{
   pattern="^${NICY_SCRIPTS_PATH:-$HOME/bin/nicy}.*"
   # Not valid absolute path
   if [ "$1" = "$name" ] ||
-    [[ "$(readlink -f $(which "$cmd"))" =~ $pattern ]]; then
+    [[ "$(readlink -f $(which "$name") 2>/dev/null)" =~ $pattern ]]; then
     for path in $(which -a "$name"); do
       # Skip path that contains "nicy"
       [[ "$path" =~ $pattern ]] && continue
@@ -279,10 +311,8 @@ get_cmdlines() { #{{{
   esac
   shift
   cmd=$(find_cmd_path "$1")
-  jqscript='include "nicy" ; main'
-  jq -nr -L "$NICY_DATADIR" "$jqscript" \
-    --argjson cachedb "$(<"$DATABASE")" \
-    --args "$(basename "$cmd")" \
+  jqscript='include "run" ; run'
+  printf '"%s"\n' "$(basename "$cmd")" \
     "$cmd" \
     "${PRESET}" \
     "${USE_CGROUP}" \
@@ -294,7 +324,9 @@ get_cmdlines() { #{{{
     "$(nproc --all)" \
     "$(ulimit -H -e)" \
     "$SCHED" \
-    "$IO" >"$COMMANDS" 2>&1
+    "$IO" |
+    jq -sr -L "$LIBDIR" "$jqscript" \
+      --argjson cachedb "$(<"$DATABASE")" >"$COMMANDS" 2>&1
   ret=$?
   [ "$ret" -ne 0 ] &&
     error_exit "$ret" "jq: $(<"$COMMANDS")" ||
@@ -304,25 +336,21 @@ get_cmdlines() { #{{{
     true
 } #}}}
 
-if [ $UID -ne 0 ]; then
-  print_command() { #{{{
-    text="${PROG}: ${subcmd}: $@"
+print_command() { #{{{
+  text="$*"
+  text=${text#echo }
+  if [ $UID -ne 0 ]; then
     text=${text// \$\{user_or_system\}/ --user}
     text=${text//\$SUDO /$SUDO }
-    text=${text//\$\$/$$}
-    text=${text// >\/dev\/null/}
-    echo "$text"
-  } #}}}
-else
-  print_command() { #{{{
-    text="${PROG}: ${subcmd}: $@"
+  else
     text=${text// \$\{user_or_system\}/}
     text=${text//\$SUDO /}
-    text=${text//\$\$/$$}
-    text=${text// >\/dev\/null/}
-    echo "$text"
-  } #}}}
-fi
+  fi
+  text=${text//\$\$/$$}
+  # text=${text// 2>\&1/}
+  text=${text// >\/dev\/null/}
+  echo "${PROG}: ${subcmd}: $text"
+} #}}}
 
 run_commands() { #{{{
   bool $QUIET &&
@@ -342,8 +370,8 @@ run_commands() { #{{{
     bool $DRY_RUN &&
       continue
     [ "$1" = "echo" ] &&
-    "${cmd[@]}" ||
-    eval "${cmd[@]}"
+      "${cmd[@]}" ||
+      eval "${cmd[@]}"
   done
 } #}}}
 
@@ -357,6 +385,9 @@ dump_script() { #{{{
   done
 } #}}}
 
+# Install
+# -------
+
 remove_from_path() { #{{{
   case ":${PATH}:" in
     *":${1}:"*)
@@ -366,19 +397,21 @@ remove_from_path() { #{{{
 } #}}}
 
 stream_scripts() { #{{{
-  IFS='' read -r -d '' jqscript <<_EOF_ || true
-include "nicy" ;
-stream_scripts_from_rules("$1"; $(nproc --all); $(ulimit -H -e))
-_EOF_
-  jqargs=(
-    --unbuffered
-    -L "$NICY_DATADIR"
-    --argjson "cachedb" "$(<"$DATABASE")"
-    "$jqscript"
-  )
-  [ -s "$NICY_IGNORE" ] && jqargs+=(--args $(<"$NICY_IGNORE"))
-  jq -nr "${jqargs[@]}" 2>&1 ||
-    error_exit 16 "unknown error with jq. Aborting."
+  {
+    if [ -f "$NICY_IGNORE" ]; then
+      mapfile -t comms < <(sed -E '/^[ ]*#+/d' "$NICY_IGNORE")
+      printf '"%s"\n' "${comms[@]}"
+    else
+      :
+    fi
+  } |
+    jq -sr -L "$LIBDIR" \
+      --argjson "cachedb" "$(<"$DATABASE")" \
+      --argjson "nproc" "$(nproc --all)" \
+      --argjson "max_nice" "$(ulimit -H -e)" \
+      --arg "shell" "$1" \
+      'include "install" ; stream_scripts_from_rules' 2>&1 ||
+        error_exit 16 "unknown error with jq. Aborting."
 } #}}}
 
 write_scripts() { #{{{
@@ -424,9 +457,6 @@ install_scripts() { #{{{
   # Delete nicy scripts but preserve all links
   find "${SCRIPTS_PATH}/" -type f -iname "*.nicy" -delete
 
-  # Rebuild the json cache files
-  check_or_build_cache "yes"
-
   # Create nicy script for all the rules matching an available command
   stream_scripts "$SCRIPT_SHELL" |&
   tee "$RUNTIMEDIR/stream_output" |
@@ -444,6 +474,9 @@ install_scripts() { #{{{
   fi
 } #}}}
 
+# Manage
+# ------
+
 rawprocstat() { #{{{
   cat /proc/[0-9]*/stat 2>/dev/null
   return 0
@@ -459,17 +492,13 @@ awkprocstat() { #{{{
         SLICE_SKIP=' cgres[2] !~ /system.slice/ '
         unset UID_SKIP
         ;;
-      --global)
-        unset UID_SKIP
-        ;;
-      --user)
-        ;;
+      --global) unset UID_SKIP ;;
+      --user) ;;
       --all)
         unset SLICE_SKIP
         unset UID_SKIP
         ;;
-      *)
-        ;;
+      *) ;;
     esac
 
   awkscript="$(<"$NICY_DATADIR/procstat.awk")"
@@ -481,22 +510,21 @@ awkprocstat() { #{{{
     awkscript=${awkscript//\#SLICE_SKIP/$replace}
 
   # Get processes stat and format
-  rawprocstat |sort -n |
+  rawprocstat | sort -n |
     LC_ALL=C awk "$awkscript" - 2>/dev/null |
     tee "$RUNTIMEDIR/awkout"
   return 0
 } #}}}
 
 manage_processes() { #{{{
-  # awkprocstat "$1"
   awkprocstat "$1" |
-    jq -sr -L "$NICY_DATADIR" \
+    jq -sr -L "$LIBDIR" \
       --argjson "cachedb" "$(<"$DATABASE")" \
       --argjson "nproc" $(nproc --all) \
       --argjson "max_nice" $(ulimit -H -e) \
       --argjson "uid" $UID \
       --arg "shell" "/bin/bash" \
-      'include "nicy"; manage_runtime' >"$COMMANDS" || true
+      'include "manage"; manage_runtime' >"$COMMANDS" || true
   return 0
 } #}}}
 
@@ -520,13 +548,40 @@ do_unlock() { #{{{
   [ -f "$1/lock" ] && rm "$1/lock" || true
 } #}}}
 
-# Parsing options
+# Options
+# -------
 
 check_missing_argument() { #{{{
   case "$OPTARG" in
     -*) error_exit 1 "missing argument for option '-$option'." ;;
   esac
   return 0
+} #}}}
+
+parse_rebuild_options() { #{{{
+  OPTIND=1
+  while getopts ":-:h" option; do #{{{
+    case $option in
+      -)
+        case "$OPTARG" in
+          help)
+            rebuild_usage 
+            exit 0
+            ;;
+          force) FORCE_REBUILD=true ;;
+          -) break ;;
+          *) error_exit 1 "unknown option '--$OPTARG'." ;;
+        esac
+        ;;
+      h)
+        rebuild_usage
+        exit 0
+        ;;
+      \?) error_exit 1 "unknown option '-$OPTARG'." ;;
+      :) error_exit 1 "missing argument for option '-$OPTARG'." ;;
+    esac
+  done #}}}
+  return $(($OPTIND - 1))
 } #}}}
 
 parse_list_options() { #{{{
@@ -585,6 +640,22 @@ parse_install_options() { #{{{
           help)
             install_usage
             exit 0
+            ;;
+          shell=*)
+            value=${OPTARG#shell=}
+            supported_shell_or_die "$value" &>/dev/null &&
+              SCRIPT_SHELL=$value || {
+                echo "${PROG}: not supported : $value. Using $NICY_SHELL" >&2
+                SCRIPT_SHELL=$NICY_SHELL
+              }
+            ;;
+          path=*)
+            dir=$(eval echo "${OPTARG#path=}")
+            [ -d "$dir" ] ||
+              error_exit 1 "no such directory '$dir'"
+            [ -w "$dir" ] ||
+              error_exit 1 "not writable directory '$dir'"
+            SCRIPTS_PATH=$dir
             ;;
           -) break ;;
           *) error_exit 1 "unknown option '--$OPTARG'." ;;
@@ -649,7 +720,7 @@ parse_run_or_show_options() { #{{{
           quiet) QUIET=true ;;
           verbose) VERBOSITY=$(($VERBOSITY + 1)) ;;
           preset=*) # Accepts auto, default, cgroup-only or any known type
-            value=${OPTARG#type=}
+            value=${OPTARG#preset=}
             [[ "${value,,}" =~ (auto|default|cgroup-only) ]] &&
               PRESET="${value,,}" ||
               PRESET="$value"
@@ -696,6 +767,9 @@ parse_run_or_show_options() { #{{{
   return $(($OPTIND - 1))
 } #}}}
 
+# Main
+# ----
+
 if [ $# -gt 0 ]; then
   subcmd=$1
   shift
@@ -714,10 +788,12 @@ case "$subcmd" in
     exit 0
     ;; #}}}
   rebuild) #{{{
+    parse_rebuild_options "$@" || shift $?
     if [ $# -eq 0 ]; then
       echo "Building nicy json cache..."
       (cd $CACHEDIR && rm -f rules types cgroups)
-      check_or_build_cache "yes"
+      # Rebuild the json cache files
+      check_or_build_cache "$FORCE_REBUILD"
       rc=$?
       [ $rc -eq 0 ] &&
         echo "Done." ||
@@ -725,10 +801,7 @@ case "$subcmd" in
       exit $rc
     else
       rebuild_usage
-      case "$1" in
-        -h | --help) exit 0 ;;
-        *) exit 1 ;;
-      esac
+      error_exit 1 "too many arguments."
     fi
     ;; #}}}
   run | show) #{{{
@@ -739,6 +812,9 @@ case "$subcmd" in
     if [ -z "$1" ]; then
       list_usage
       error_exit 1 "missing category."
+    elif [ $# -gt 1 ]; then
+      list_usage
+      error_exit 1 "too many arguments."
     else
       kind=${1,,}
       kind=${kind%s}
@@ -757,27 +833,27 @@ case "$subcmd" in
   install) #{{{
     parse_install_options "$@" || shift $?
     if [ $# -gt 0 ]; then
-      SCRIPT_SHELL=$(supported_shell_or_die "$1")
-      if [ $# -gt 1 ]; then
-        SCRIPTS_PATH="$2"
-      fi
+      install_usage
+      error_exit 1 "too many arguments."
     fi
-    [ -v SCRIPT_SHELL ] ||
-      SCRIPT_SHELL="/bin/sh"
-    [ -v SCRIPTS_PATH ] ||
-      SCRIPTS_PATH=${NICY_SCRIPTS_PATH:-$HOME/bin/nicy}
-    echo -n "Installing scripts using '$SCRIPT_SHELL' to '$SCRIPTS_PATH'... "
+    # Rebuild the json cache files
+    check_or_build_cache "yes"
+    echo -n "Installing $(basename $SCRIPT_SHELL) scripts in $SCRIPTS_PATH ... "
     install_scripts
     echo "All done."
     exit 0
     ;; #}}}
-  manage)
+  manage) #{{{
     parse_manage_options "$@" || shift $?
     if [[ "$DO_MANAGE" =~ --(system|global|all) ]]; then
       [ $UID -eq 0 ] ||
         error_exit 1 "not available without root privileges: '$DO_MANAGE'."
     fi
-    ;;
+    if [ $# -gt 0 ]; then
+      manage_usage
+      error_exit 1 "too many arguments."
+    fi
+    ;; #}}}
   *)
     usage
     error_exit 1 "unknown subcommand '$subcmd'."
@@ -794,12 +870,11 @@ case "$subcmd" in
       # Save the command arguments, if any, for later use
       declare -ga cmdargs=("$@")
     else
-      usage
+      "${subcmd}_usage"
       error_exit 1 "missing command."
     fi
     ;;
 esac
-
 
 # Lock the runtime dir
 do_lock "$RUNTIMEDIR"

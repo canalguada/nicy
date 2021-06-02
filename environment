@@ -1,14 +1,17 @@
-# User configuration files, if any, then global ones
+# Set path to jq implementation
+# JQ_PATH=$(command -v jq)
+
+# Set user, if any, then global directories for configuration files
 # NICY_SEARCH_DIRS=( "$HOME/.config/nicy" "/usr/local/etc/nicy" )
 
-# Nicy jq library path
+# Set nicy read-only data directory
 # NICY_DATADIR="/usr/local/share/nicy"
 
 # Show what command is launched and some more information from systemd-run
 # NICY_VERBOSE="y"
 
 # Use this shell when writing scripts
-# NICY_SHELL=/bin/sh
+# NICY_SHELL=/bin/bash
 
 # Use this command when root-credentials are required
 # NICY_SUDO=sudo
