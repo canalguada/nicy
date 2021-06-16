@@ -1,6 +1,4 @@
-#!/usr/bin/awk -f
-#
-# manage.awk --- Filter and format cat /proc/*/stat output to be used as jq input
+# procstat.awk --- Filter and format cat /proc/*/stat output to be used as jq input
 # Ex.
 # cat /proc[0-9]*/stat | ./procstat.awk
 #

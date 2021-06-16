@@ -25,7 +25,7 @@ ENOTFOUND=127
 
 error_exit() { #{{{
   echo "$PROG: error: ${2:-'unknown error'}" >&2
-  exit "${1:-$EXIT_FAILURE}"
+  exit "${1:-$FAILURE}"
 } #}}}
 
 bool() { #{{{
@@ -189,7 +189,7 @@ jq_usage() { #{{{
 } #}}}
 
 version() { #{{{
-  jq -r '"\(.program) version \(.version)' "${NICY_DATA}/usage.json"
+  jq -r '"\(.program) version \(.version)"' "${NICY_DATA}/usage.json"
 } #}}}
 
 run_usage() { jq_usage ; }

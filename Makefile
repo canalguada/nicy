@@ -2,7 +2,7 @@ SHELL		= /bin/bash
 DESTDIR		?=
 package		= nicy
 version		= 0.1.4
-revision	= 1
+revision	= 2
 release_dir	= ..
 release_file	= $(release_dir)/$(package)-$(version)
 prefix		= /usr/local
@@ -51,8 +51,8 @@ install-man: man
 install-lib:
 	install -d $(DESTDIR)$(libdir)/jq
 	find lib/jq/ -type f -iname "*.jq" \
-		-exec install -m755 {} $(DESTDIR)$(libdir)/jq/ \;
-	install -m755 lib/procstat.awk $(DESTDIR)$(libdir)/
+		-exec install -m644 {} $(DESTDIR)$(libdir)/jq/ \;
+	install -m644 lib/procstat.awk $(DESTDIR)$(libdir)/
 
 install-data:
 	install -d $(DESTDIR)$(datadir)
