@@ -9,6 +9,7 @@
 #   "ppid",
 #   "pgrp",
 #   "uid",
+#   "user",
 #   "state",
 #   "slice",
 #   "unit",
@@ -27,40 +28,43 @@
 BEGIN { pgrp = PROCINFO["pgrpid"] ; }
 $5 !~ pgrp {
 # {
-  "stat -c %u /proc/" $1 | getline uid
+  "stat -c '%u %U' /proc/" $1 | getline out
+  if (match(out, "(.*) (.*)", uid) == 0) {
+    uid[1]=0 ;
+    uid[2]="root" ;
+  }
   #UID_SKIP
 
-  getline cgroup < sprintf("/proc/%d/cgroup", $1)
-  n = split(cgroup, cgres, "/")
+  getline cgpath < sprintf("/proc/%d/cgroup", $1)
+  gsub(/\\/, "\\\\", cgpath)
+  n = split(cgpath, cgroup, "/")
   #SLICE_SKIP
 
   gsub("[()]", "", $2)
-  getline oom_score_adj < sprintf("/proc/%d/oom_score_adj", $1)
+  getline score_adj < sprintf("/proc/%d/oom_score_adj", $1)
   "ionice -p " $1 | getline out
-  if (match(out, "(.*): prio(.*)", iores) == 0) {
-    iores[2]=0 ;
+  if (match(out, "(.*): prio(.*)", io) == 0) {
+    io[2]=0 ;
     if (out == "idle") {
-      iores[1]="idle" ;
+      io[1]="idle" ;
     } else {
-      iores[1]="none" ;
+      io[1]="none" ;
     }
   }
 
   printf "%s", "[ "
-  #       pid, ppid, pgrp, uid, state
-  printf "%d, %d, %d, %d, \"%c\", ", \
-         $1, $4, $5, uid, $3
+  #       pid, ppid, pgrp, uid, user, state
+  printf "%d, %d, %d, %d, \"%s\", \"%c\", ", \
+         $1, $4, $5, uid[1], uid[2], $3
   #       slice,  unit,   comm,   cgroup
   printf "\"%s\", \"%s\", \"%s\", \"%s\", ", \
-         cgres[2], cgres[n], $2, cgroup
+         cgroup[2], cgroup[n], $2, cgpath
   #       priority, nice, num_threads, rtprio, policy
   printf "%d, %d, %d, %d, %d, ", \
          $18, $19, $20, $40, $41
-
   #       oom_score_adj, ioclass, ionice
   printf "%d, \"%s\", %d", \
-         oom_score_adj, iores[1], iores[2]
-
+         score_adj, io[1], io[2]
   printf "%s", " ]\n"
 }
 

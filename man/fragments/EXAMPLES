@@ -1,0 +1,147 @@
+.SH EXAMPLES
+.B Example 1. Installing scripts that replace the nicy commands.
+.P
+.RB "After adding a new rule and using the " rebuild " builtin command to \
+refresh the cache, with the configuration above, " \
+nicy\ run\ other\-browser " roughly executes the script below, \
+generated with the " show " builtin command:"
+.P
+.EX
+$ nicy rebuild --force
+Building json cache...
+Done.
+
+$ nicy show other-browser
+#!/bin/sh
+[ $(id -u) -ne 0 ] && user_or_system=--user || user_or_system=
+[ $(id -u) -ne 0 ] && SUDO=sudo || SUDO=
+$SUDO renice -n -3 -p $$ >/dev/null 2>&1
+systemctl ${user_or_system} start nicy-cpu66.slice >/dev/null 2>&1
+systemctl ${user_or_system} --runtime set-property  \\
+        nicy-cpu66.slice CPUQuota=66% >/dev/null 2>&1
+exec systemd-run ${user_or_system} -G -d --no-ask-password --quiet \\
+        --unit=other-browser-$$ --scope --slice=nicy-cpu66.slice \\
+        -p MemoryHigh=60% -p MemoryMax=75% choom -n 1000 \\
+        -- /usr/bin/other-browser "$@"
+.EE
+.P
+.RI "One user can then copy this script somewhere at the beginning of its PATH\
+, turning it available as a nicy replacement for"
+.RB "the initial " other-browser " command ."
+.P
+.RB "With " install " builtin command, after removing the duplicates and if \
+matching an existing command, " nicy " generates " $NICY_SHELL " scripts for \
+all the specific rules and installs them in " \fI$NICY_SCRIPTS \&.
+See ENVIRONMENT below.
+.P
+.B Example 2. Managing the running processes of the current user.
+.P
+.BR nicy " can scan the running processes looking for properties to apply in \
+order to match existing specific rules. For instance, after launching" \
+pcmanfm-qt " file manager and using the " list " builtin command to check \
+existing rule and type, " nicy " can adjust the niceness and I/O \
+scheduling class properties, then move any process in the " \
+pcmanfm-qt " process group to its proper scope, with " manage " builtin \
+command."
+.P
+.EX
+$ /usr/bin/pcmanfm-qt &>/dev/null &
+[1] 2686
+
+$ cat /proc/2686/cgroup
+0::/user.slice/user-1001.slice/session-2.scope
+
+$ nicy list rules | grep pcmanfm-qt
+pcmanfm-qt     {"name":"pcmanfm-qt","type":"File-Manager"}
+
+$ nicy list types | grep File-Manager
+File-Manager   \\
+{"type":"File-Manager","nice":-3,"ioclass":"best-effort","cgroup":"cpu33"}
+
+$ nicy manage --dry-run --user
+nicy: manage: adjusting comm:pcmanfm-qt pgrp:2686 \\
+    cgroup:session-3.scope pids:2686
+nicy: manage: sudo renice -n -3 -g 2686
+nicy: manage: ionice -c 2 -P 2686
+nicy: manage: systemctl --user start nicy-cpu33.slice
+nicy: manage: systemctl --user --runtime set-property \\
+    nicy-cpu33.slice CPUQuota=33%
+nicy: manage: busctl call --quiet --user org.freedesktop.systemd1 \\
+    /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager \\
+    StartTransientUnit ssa(sv)a(sa(sv)) pcmanfm-qt-2686.scope \\
+    fail 2 PIDs au 1 2686 Slice s nicy-cpu33.slice 0
+
+$ systemd-cgls /user.slice/user-1001.slice/user@1001.service/nicy.slice
+Control group /user.slice/user-1001.slice/user@1001.service/nicy.slice:
+└─nicy-cpu33.slice 
+  └─pcmanfm-qt-2686.scope 
+    └─2686 /usr/bin/pcmanfm-qt
+.EE
+.P
+.BR nicy " can adjust the properties of almost any process, whether it runs \
+in user or in system slice."
+.P
+.B Example 3. Managing the processes in system slice as superuser.
+.P
+.EX
+# nicy manage --dry-run --system
+nicy: manage: adjusting comm:cupsd pgrp:460 cgroup:cups.service pids:460
+nicy: manage: renice -n 19 -g 460
+nicy: manage: ionice -c 3 -P 460
+nicy: manage: chrt --idle -a -p 0 460
+nicy: manage: systemctl --runtime set-property cups.service CPUQuota=16%
+nicy: manage: adjusting comm:lightdm pgrp:540 cgroup:lightdm.service pids:540
+nicy: manage: ionice -c 1 -n 4 -P 540
+nicy: manage: adjusting comm:cups-browsed pgrp:550 \\
+    cgroup:cups-browsed.service pids:550
+nicy: manage: renice -n 19 -g 550
+nicy: manage: ionice -c 3 -P 550
+nicy: manage: chrt --idle -a -p 0 550
+nicy: manage: systemctl --runtime set-property \\
+    cups-browsed.service CPUQuota=16%
+nicy: manage: adjusting comm:Xorg pgrp:580 cgroup:lightdm.service pids:580
+nicy: manage: renice -n -10 -g 580
+nicy: manage: ionice -c 1 -n 1 -P 580
+nicy: manage: adjusting comm:apache2 pgrp:974 cgroup:apache2.service pids:974
+nicy: manage: renice -n 19 -g 974
+nicy: manage: ionice -c 2 -n 7 -P 974
+nicy: manage: systemctl --runtime set-property apache2.service CPUQuota=66%
+
+.EE
+.P
+.B Example 4. Managing the processes of all users as superuser.
+.P
+.EX
+# nicy manage --dry-run --global
+nicy: manage: adjusting comm:lightdm pgrp:541 cgroup:session-3.scope pids:1310
+nicy: manage: ionice -c 1 -n 4 -P 541
+nicy: manage: adjusting comm:pulseaudio pgrp:1467 \\
+    cgroup:pulseaudio.service pids:1467
+nicy: manage: ionice -c 1 -P 1467
+nicy: manage: chrt --rr -a -p 1 1467
+nicy: manage: adjusting comm:i3 pgrp:1485 cgroup:session-3.scope pids:1485
+nicy: manage: renice -n -10 -g 1485
+nicy: manage: ionice -c 1 -P 1485
+nicy: manage: adjusting comm:mopidy pgrp:3032 cgroup:mopidy.service pids:3032
+nicy: manage: ionice -c 1 -P 3032
+nicy: manage: adjusting comm:pcmanfm-qt pgrp:9063 \\
+    cgroup:session-3.scope pids:9064
+nicy: manage: renice -n -3 -g 9063
+nicy: manage: runuser -u canalguada -- env \\
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \\
+    XDG_RUNTIME_DIR=/run/user/1001 \\
+    systemctl --user start nicy-cpu33.slice
+nicy: manage: runuser -u canalguada -- env \\
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \\
+    XDG_RUNTIME_DIR=/run/user/1001 \\
+    systemctl --user --runtime set-property nicy-cpu33.slice CPUQuota=33%
+nicy: manage: runuser -u canalguada -- env \\
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus \\
+    XDG_RUNTIME_DIR=/run/user/1001 \\
+    busctl call --quiet --user \\
+    org.freedesktop.systemd1 /org/freedesktop/systemd1 \\
+    org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \\
+    pcmanfm-qt-9064.scope fail 2 PIDs au 1 9064 Slice s nicy-cpu33.slice 0
+.EE
+.P
+Many long lines are formatted in this section to fit the manpage width.

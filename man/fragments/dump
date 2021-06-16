@@ -1,0 +1,9 @@
+#!/bin/sh
+# vim: set ft=sh fdm=indent ai ts=2 sw=2 tw=79 et:
+
+cat \
+  HEADERS SYNOPSIS DESCRIPTION \
+  COMMANDS OPTIONS FILES \
+  CONFIGURATION EXAMPLES VARIABLES \
+  DIAGNOSTICS BUGS  SEE_ALSO NOTES |
+  man -l -

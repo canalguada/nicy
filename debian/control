@@ -1,0 +1,29 @@
+Source: nicy
+Section: utils
+Priority: optional
+Maintainer: David GUADALUPE <guadalupe.david@gmail.com>
+Build-Depends: debhelper-compat (= 12)
+Standards-Version: 4.5.1
+Homepage: https://github.com/canalguada/nicy
+
+Package: nicy
+Architecture: all
+Multi-Arch: foreign
+Depends: jq (>= 1.6), systemd, ${misc:Depends}
+Description: control processes execution environment and available resources
+ nicy is a script that relies on existing system utilities and can be used
+ to ease the control upon the execution environment of the managed processes
+ and to configure the resources available to them: with renice, can alter
+ their scheduling priority; with chrt, can set their real-time scheduling
+ attributes and with ionice their I/O scheduling class and priority; with
+ choom, can adjust their Out-Of-Memory killer score setting.
+ .
+ It can create and start a transient systemd scope unit and either run
+ the specified command and its spawned processes in it with systemd-run, or
+ move yet running processes inside it.
+ .
+ When used to launch commands, nicy can also automatically change some
+ environment variables and add command arguments.
+ .
+ The processes are managed by nicy applying them generic or specific presets
+ stored in JSON format.

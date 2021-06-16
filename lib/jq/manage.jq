@@ -8,6 +8,7 @@ def requests:
     "ppid",
     "pgrp",
     "uid",
+    "user",
     "state",
     "slice",
     "unit",
@@ -97,30 +98,29 @@ def in_system_slice: test("system.slice"; "") ;
 # Set command prefix when privileges are required.
 def sudo_prefix:
   if has("cgroup") then
-    .cgroup
-    | if in_current_user_slice then
+    if (.cgroup | in_current_user_slice) then
       ""
-    # Only root is expected to manage processes outside his slice, but the
-    # logic here allows any user to act as root, if required.
-    elif in_user_slice then
+    # Only root is expected to manage processes outside his slice.
+    elif (.cgroup | in_user_slice) then
       # Current user MUST run the command as the slice owner.
       # Environment variables are required for busctl and systemctl commands
-      (capture("user-(?<uid>[0-9]+).slice") | .uid) as $puid
-      | [
-        "sudo -u \\#\($puid)",
+      # Alternative to runuser command : sudo -u \\#\(.uid)
+      # Reading info from cgroup capture("user-(?<uid>[0-9]+).slice") | .uid
+      [
+        if $uid == 0 then "" else "$SUDO" end,
+        "runuser -u \(.user) --",
         "env",
-        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\($puid)/bus",
-        "XDG_RUNTIME_DIR=/run/user/\($puid)"
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\(.uid)/bus",
+        "XDG_RUNTIME_DIR=/run/user/\(.uid)"
       ]
       | join(" ")
-    elif in_system_slice then
+    elif (.cgroup | in_system_slice) then
       # In system.slice, current user must run the command as root.
       if $uid == 0 then ""
       else "$SUDO" end
     # Detected processes run inside default slices, using user or system
     # manager as expected. You should not see this.
-    # else ("cgroup '\(.cgroup)' doesn't match an expected value." | halt_error(1)) end
-    else error("cgroup '\(.cgroup)' doesn't match an expected value.") end
+    else error("invalid cgroup: '\(.cgroup)'.") end
   else error("missing key: cgroup") end ;
 
 
@@ -320,6 +320,7 @@ def manage_runtime:
     "ppid",
     "pgrp",
     "uid",
+    "user",
     "state",
     "slice",
     "unit",

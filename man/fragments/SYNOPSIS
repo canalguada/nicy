@@ -1,0 +1,45 @@
+.SH SYNOPSIS
+.SY nicy\ run
+.RB [{ \-q \ |\  \-v }]
+.OP \-nmu
+.RB [{\& \-p
+.I preset
+.RB |\  \-d \ |\  \-z \&}]
+.RB [{\& \-c
+.I cgroup
+.RB \ |\  \-\-cpu\& \&<\& \fIquota \&>}]
+.IR COMMAND \ [ ARGUMENT ]\&.\|.\|.\&
+.YS
+.SY nicy\ show
+.RB [{ \-q \ |\  \-v }]
+.OP \-mu
+.RB [{\& \-p
+.I preset
+.RB |\  \-d \ |\  \-z \&}]
+.RB [{\& \-c
+.I cgroup
+.RB \ |\  \-\-cpu \&<\& \fIquota \&>}]
+.I COMMAND
+.YS
+.SY nicy\ list
+.OP \-f confdir
+.I CATEGORY
+.YS
+.SY nicy\ rebuild
+.OP \-\-force
+.I CATEGORY
+.YS
+.SY nicy\ install
+.RB [\& \-\-shell=\fIshell \&]
+.RB [\& \-\-path=\fIdestdir \&]
+.YS
+.SY nicy\ manage
+.OP \-n
+.RB [{ \-\-user \ |\  \-\-system \ |\  \-\-global \ |\  \-\-all }]
+.YS
+.SY nicy
+.RB { \-h \ |\  \-\-help }
+.YS
+.SY nicy
+.RB { \-V \ |\  \-\-version }
+.YS
