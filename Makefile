@@ -1,7 +1,7 @@
 SHELL		= /bin/bash
 DESTDIR		?=
 package		= nicy
-version		= 0.1.3
+version		= 0.1.4
 revision	= 1
 release_dir	= ..
 release_file	= $(release_dir)/$(package)-$(version)
@@ -10,6 +10,7 @@ bindir		= $(prefix)/bin
 confdir		= $(prefix)/etc/nicy
 datadir		= $(prefix)/share/nicy
 libdir		= $(prefix)/lib/nicy
+jqversion	= .version |= "$(version)"
 
 all:
 	: # do nothing
@@ -23,7 +24,10 @@ man:
 	cd man/fragments ; \
 	cat HEADERS SYNOPSIS DESCRIPTION COMMANDS OPTIONS FILES \
 	CONFIGURATION EXAMPLES VARIABLES DIAGNOSTICS BUGS SEE_ALSO \
-	NOTES | sed 's#%prefix%#$(prefix)#g' - > ../nicy.1 ; \
+	NOTES | \
+	sed \
+	-e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
+	- > ../nicy.1 ; \
 	cd .. ; \
 	gzip -9 -f nicy.1
 
@@ -52,7 +56,16 @@ install-lib:
 
 install-data:
 	install -d $(DESTDIR)$(datadir)
-	install -m755 data/usage.json $(DESTDIR)$(datadir)/
+	jq -r '$(jqversion)' \
+		data/usage.json > $(DESTDIR)$(datadir)/usage.json
+	jq -r -L lib/jq \
+		'include "usage"; $(jqversion) | main' \
+		data/usage.json | groff -T utf8 > $(DESTDIR)$(datadir)/nicy.help
+	for func in run show list install rebuild manage; do \
+		jqscript=$$(printf 'include "usage"; $(jqversion) | %s' $${func}) ; \
+		jq -r -L lib/jq "$${jqscript}" \
+			data/usage.json | groff -T utf8 > $(DESTDIR)$(datadir)/$${func}.help ; \
+	done
 
 install-conf:
 	install -d $(DESTDIR)$(confdir)/rules.d

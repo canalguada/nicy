@@ -1,7 +1,5 @@
 module { "name": "usage" };
 
-def version: "\(.program) version \(.version)" ;
-
 def dump: map("\(.)", ".br") | .[] ;
 
 def main:

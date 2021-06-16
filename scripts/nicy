@@ -172,23 +172,24 @@ jq() {
 # ===== {{{
 
 usage() { #{{{
-  jq -r -L "$LIBDIR" \
-    'include "usage"; main' "${NICY_DATA}/usage.json" |
-    groff -T utf8
+  [ -f "${NICY_DATA}/nicy.help" ] &&
+    cat "${NICY_DATA}/nicy.help" ||
+    jq -r -L "$LIBDIR" \
+      'include "usage"; main' "${NICY_DATA}/usage.json" |
+      groff -T utf8
 } #}}}
 
 jq_usage() { #{{{
-  jqfunction="${FUNCNAME[1]%_usage}"
-  jqscript=$(printf 'include "usage"; %s' "$jqfunction")
-  jq -r -L "$LIBDIR" \
-    "$jqscript" "${NICY_DATA}/usage.json" |
-    groff -T utf8
+  jqfunc="${FUNCNAME[1]%_usage}"
+  [ -f "${NICY_DATA}/${jqfunc}.help" ] &&
+    cat "${NICY_DATA}/${jqfunc}.help" ||
+    jq -r -L "$LIBDIR" \
+      "$(printf 'include "usage"; %s' "$jqfunc")" "${NICY_DATA}/usage.json" |
+      groff -T utf8
 } #}}}
 
 version() { #{{{
-  jq -r -L "$LIBDIR" \
-    'include "usage"; version' "${NICY_DATA}/usage.json" |
-    groff -T utf8
+  jq -r '"\(.program) version \(.version)' "${NICY_DATA}/usage.json"
 } #}}}
 
 run_usage() { jq_usage ; }

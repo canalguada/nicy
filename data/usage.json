@@ -1,6 +1,6 @@
 {
   "program": "nicy",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "Set the execution environment and configure the resources that spawned and running processes are allowed to share.",
   "usage": {
     "run": "run [OPTION]... COMMAND [ARGUMENT]...",
