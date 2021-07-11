@@ -2,7 +2,7 @@ SHELL		= /bin/bash
 DESTDIR		?=
 package		= nicy
 version		= 0.1.4
-revision	= 2
+revision	= 3
 release_dir	= ..
 release_file	= $(release_dir)/$(package)-$(version)
 prefix		= /usr/local
@@ -31,9 +31,10 @@ man:
 	cd .. ; \
 	gzip -9 -f nicy.1
 
-deb:
-	debmake -b"nicy:sh" -u"$(version)" -r"$(revision)" -t && \
-	cd ../nicy-$(version) && \
+deb: dist
+	cd $(release_dir) && tar -xf $(package)-$(version).tar.gz && \
+	cd nicy-$(version) && \
+	debmake -b"nicy:sh" -u"$(version)" -r"$(revision)" && \
 	debuild
 
 dist:
