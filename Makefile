@@ -1,17 +1,25 @@
 SHELL		= /bin/bash
 DESTDIR		?=
 package		= nicy
-version		= 0.1.4
-revision	= 3
+program		= nicy
+git_branch	= golang
+version		= 0.1.5
+revision	= 1
 release_dir	= ..
 release_file	= $(release_dir)/$(package)-$(version)
 prefix		= /usr/local
 bindir		= $(prefix)/bin
-confdir		= $(prefix)/etc/nicy
-datadir		= $(prefix)/share/nicy
-libdir		= $(prefix)/lib/nicy
-jqversion	= .version |= "$(version)"
+confdir		= $(prefix)/etc/$(program)
+libdir		= $(prefix)/lib/$(program)
 
+
+.DEFAULT_GOAL := build
+
+build:
+	/usr/bin/go build -o $(program) -ldflags="-s" .
+
+capabilities:
+	/usr/sbin/setcap "cap_setpcap,cap_sys_nice=p" ./$(program)
 all:
 	: # do nothing
 
@@ -27,46 +35,39 @@ man:
 	NOTES | \
 	sed \
 	-e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
-	- > ../nicy.1 ; \
+	- > ../$(program).1 ; \
 	cd .. ; \
-	gzip -9 -f nicy.1
+	gzip -9 -f $(program).1
 
-deb: dist
-	cd $(release_dir) && tar -xf $(package)-$(version).tar.gz && \
-	cd nicy-$(version) && \
-	debmake -b"nicy:sh" -u"$(version)" -r"$(revision)" && \
-	debuild
+# deb: dist
+	# cd $(release_dir) && tar -xf $(package)-$(version).tar.gz && \
+	# cd $(package)-$(version) && \
+	# debmake -b"$(package):bin" -u"$(version)" -r"$(revision)" && \
+	# debuild
+	# [WIP] Build with dh-make-golang make -force-prerelease  -git_revision $(git_branch) -type p github.com/canalguada/nicy
 
 dist:
-	git archive --format=tar.gz -o $(release_dir)/$(package)-$(version).tar.gz --prefix=$(package)-$(version)/ master
+	git archive --format=tar.gz \
+		-o $(release_dir)/$(package)-$(version).tar.gz \
+		--prefix=$(package)-$(version)/ \
+		$(git_branch)
 
-install-scripts:
+install-bin:
 	install -d $(DESTDIR)$(bindir)
-	install -m755 scripts/nicy $(DESTDIR)$(bindir)/
-	sed -i 's#prefix=/usr/local#prefix=$(prefix)#g' $(DESTDIR)$(bindir)/nicy
+	install -m755 $(program) $(DESTDIR)$(bindir)/$(program)
 
 install-man: man
 	install -d $(DESTDIR)$(prefix)/share/man/man1
-	install -m644 man/nicy.1.gz $(DESTDIR)$(prefix)/share/man/man1/
+	install -m644 man/$(program).1.gz $(DESTDIR)$(prefix)/share/man/man1/
 
 install-lib:
 	install -d $(DESTDIR)$(libdir)/jq
-	find lib/jq/ -type f -iname "*.jq" \
-		-exec install -m644 {} $(DESTDIR)$(libdir)/jq/ \;
-	install -m644 lib/procstat.awk $(DESTDIR)$(libdir)/
-
-install-data:
-	install -d $(DESTDIR)$(datadir)
-	jq -r '$(jqversion)' \
-		data/usage.json > $(DESTDIR)$(datadir)/usage.json
-	jq -r -L lib/jq \
-		'include "usage"; $(jqversion) | main' \
-		data/usage.json | groff -T utf8 > $(DESTDIR)$(datadir)/nicy.help
-	for func in run show list install rebuild manage; do \
-		jqscript=$$(printf 'include "usage"; $(jqversion) | %s' $${func}) ; \
-		jq -r -L lib/jq "$${jqscript}" \
-			data/usage.json | groff -T utf8 > $(DESTDIR)$(datadir)/$${func}.help ; \
-	done
+	install -m644 lib/jq/common.jq $(DESTDIR)$(libdir)/jq/
+	install -m644 lib/jq/install.jq $(DESTDIR)$(libdir)/jq/
+	install -m644 lib/jq/list.jq $(DESTDIR)$(libdir)/jq/
+	install -m644 lib/jq/manage.jq $(DESTDIR)$(libdir)/jq/
+	install -m644 lib/jq/rebuild.jq $(DESTDIR)$(libdir)/jq/
+	install -m644 lib/jq/run.jq $(DESTDIR)$(libdir)/jq/
 
 install-conf:
 	install -d $(DESTDIR)$(confdir)/rules.d
@@ -77,16 +78,13 @@ install-conf:
 	install -m644 conf/rules.d/vim.rules $(DESTDIR)$(confdir)/rules.d/
 
 
-install: install-scripts install-man install-lib install-data install-conf
+install: build capabilities install-bin install-man install-lib install-conf
 
-uninstall-scripts:
-	rm -f $(DESTDIR)$(bindir)/nicy
+uninstall-bin:
+	rm -f $(DESTDIR)$(bindir)/$(program)
 
 uninstall-man:
-	rm -f $(DESTDIR)$(prefix)/share/man/man1/nicy.1.gz
-
-uninstall-data:
-	rm -rf $(DESTDIR)$(datadir)
+	rm -f $(DESTDIR)$(prefix)/share/man/man1/$(program).1.gz
 
 uninstall-lib:
 	rm -rf $(DESTDIR)$(libdir)
@@ -99,9 +97,9 @@ uninstall-conf:
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(confdir)/rules.d
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(confdir)
 
-uninstall: uninstall-scripts uninstall-man uninstall-lib uninstall-data \
-	uninstall-conf
+uninstall: uninstall-bin uninstall-man uninstall-lib uninstall-conf
 
-.PHONY: all clean distclean man deb dist install-scripts install-man install-lib \
-	install-data install-conf install uninstall-scripts uninstall-man \
-	uninstall-lib uninstall-data uninstall-conf uninstall
+.PHONY: all build clean distclean man deb dist \
+	install-bin install-man install-lib install-conf \
+	uninstall-bin uninstall-man uninstall-lib uninstall-conf \
+	install uninstall
