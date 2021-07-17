@@ -44,10 +44,10 @@ var listCmd = &cobra.Command{
 		if viper.IsSet("from") {
 			confdirs = []interface{}{viper.Get("from")}
 		} else {
-			dirs := viper.GetStringSlice("confdirs")
-			confdirs = make([]interface{}, len(dirs))
-			for i, dir := range dirs {
-				confdirs[i] = dir
+			slice := viper.GetStringSlice("confdirs")
+			confdirs = make([]interface{}, len(slice))
+			for i, path := range slice {
+				confdirs[i] = expandPath(path)
 			}
 		}
 		// Prepare variables
@@ -63,7 +63,7 @@ var listCmd = &cobra.Command{
 			cachedb,
 			strings.TrimRight(args[0], "s"),
 		)
-		req.LibDirs = []string{path.Join(viper.GetString("libdir"), "jq")}
+		req.LibDirs = []string{path.Join(expandPath(viper.GetString("libdir")), "jq")}
 		output, err := req.Output(confdirs)
 		checkErr(err)
 

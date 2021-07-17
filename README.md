@@ -88,7 +88,6 @@ See [CONFIGURATION.md](https://github.com/canalguada/nicy/blob/master/CONFIGURAT
 
 ## TODO
 * Implement `install` and `manage` missing subcommands.
-* Implement configuration for system user.
 * Fix Debian and Archlinux packaging.
 * Provide tests and document code.
 

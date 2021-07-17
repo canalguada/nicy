@@ -23,7 +23,6 @@ import (
 	"bufio"
 	"regexp"
 	"io/ioutil"
-	"path"
 	"path/filepath"
 	"strings"
 	"sort"
@@ -32,7 +31,6 @@ import (
 	"github.com/canalguada/nicy/jq"
 	"github.com/spf13/viper"
 )
-
 
 // readDirNames reads the directory named by dirname and returns a sorted list
 // of directory entries.
@@ -285,7 +283,7 @@ func findValidPath(command string) (valid string, err error) {
   // Strip suffix, if any
 	basename = strings.TrimSuffix(basename, ".nicy")
   // Set an absolute path for the final command
-	prefix := viper.GetString("scripts")
+	prefix := expandPath(viper.GetString("scripts"))
 	which, err := lookPath(basename)
 	if err != nil {
 		return
@@ -316,7 +314,7 @@ func yieldScriptFrom(shell string, args []string) (Script, error) {
 		return nil, err
 	}
 	req := jq.NewRequest(`include "run"; run`, []string{"$cachedb"}, cachedb)
-	req.LibDirs = []string{path.Join(viper.GetString("libdir"), "jq")}
+	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
 	// Prepare input
 	command, err := findValidPath(args[0])
 	if err != nil {

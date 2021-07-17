@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"strconv"
 	"text/tabwriter"
-	"path"
+	"path/filepath"
+	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"kernel.org/pub/linux/libs/security/libcap/cap"
 	flag "github.com/spf13/pflag"
@@ -101,68 +103,102 @@ func printErrf(format string, a ...interface{}) (n int, err error){
 	return
 }
 
+func createDirectoryIfNotExist(name string, perm os.FileMode) error {
+	if _, err := os.Stat(name); os.IsNotExist(err) {
+		return os.Mkdir(name, perm)
+	}
+	return nil
+}
+
+func expandPath(path string) string {
+	s, err := homedir.Expand(path)
+	if err != nil {
+		s = path
+	}
+	return os.ExpandEnv(s)
+}
+
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	// TODO: Manage defaults and config paths for superuser
+	var (
+		path string
+		err error
+	)
 	viper.SetDefault("PROG", prog)
-	// Find home directory.
-	home, err := os.UserHomeDir()
-	checkErr(wrapError(err))
-	viper.SetDefault("HOME", home)
-	// Set some default values
-	// Find XDG_CONFIG_HOME directory
-	configHome, err := os.UserConfigDir()
-	checkErr(wrapError(err))
-	viper.SetDefault("XDG_CONFIG_HOME", configHome)
-	// UID
-	viper.SetDefault("UID", os.Getuid())
-	// XDG_RUNTIME_DIR and runtimedir
-	dir, ok := os.LookupEnv("XDG_RUNTIME_DIR")
-	if !(ok) {
-		dir = path.Join("/run/user", fmt.Sprintf("%d", viper.GetInt("UID")))
+	// Common configuration, per order of precedence in :
+	// - /usr/local/etc/%prog%
+	// - /etc/%prog%
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	// Get UID
+	uid := os.Getuid()
+	viper.SetDefault("UID", uid)
+	if uid != 0 {
+		//  Configuration in %XDG_CONFIG_HOME%/%prog% will take precedence
+		// Find HOME
+		path, err = homedir.Dir() // Required
+		checkErr(wrapError(err))
+		viper.SetDefault("HOME", path)
+		// Then XDG_CONFIG_HOME
+		path, _ = os.UserConfigDir() // No error, HOME is defined
+		viper.SetDefault("XDG_CONFIG_HOME", path)
+		// Finally
+		// viper.AddConfigPath(filepath.Join(configHome, prog))
 	}
-	viper.SetDefault("XDG_RUNTIME_DIR", dir)
-	viper.SetDefault("runtimedir", path.Join(dir, prog))
-	// XDG_CACHE_HOME and cachedir
-	dir, err = os.UserCacheDir()
-	checkErr(wrapError(err))
-	viper.SetDefault("XDG_CACHE_HOME", dir)
-	cachedir := path.Join(dir, prog)
-	viper.SetDefault("cachedir", cachedir)
-	// cgroups, types, rules and database
-	for _, filename := range []string{"cgroups", "types", "rules", "database"} {
-		viper.SetDefault(filename, path.Join(cachedir, filename))
+	if uid != 0 {
+		// Set XDG_CACHE_HOME and cachedir
+		path, _ = os.UserCacheDir() // No error, HOME is defined
+		viper.SetDefault("XDG_CACHE_HOME", path)
+		viper.SetDefault("cachedir", filepath.Join(path, prog))
+	} else {
+		// Set cachedir
+		viper.SetDefault("cachedir", filepath.Join("/var/cache", prog))
+	}
+	// Set XDG_RUNTIME_DIR and runtimedir
+	path, ok := os.LookupEnv("XDG_RUNTIME_DIR")
+	if !(ok) {
+		path = filepath.Join("/run/user", strconv.Itoa(uid))
+	}
+	viper.SetDefault("XDG_RUNTIME_DIR", path)
+	viper.SetDefault("runtimedir", filepath.Join(path, prog))
+	// Create required directories
+	checkErr(createDirectoryIfNotExist(viper.GetString("cachedir"), 0755))
+	checkErr(createDirectoryIfNotExist(viper.GetString("runtimedir"), 0755))
+	// Default configuration search paths (in order of precedence)
+	var configPaths []string
+	if uid != 0 {
+		configPaths = append(configPaths, viper.GetString("XDG_CONFIG_HOME"))
+	}
+	configPaths = append(configPaths, "/usr/local/etc", "/etc")
+	for i, path := range configPaths {
+		configPaths[i] = filepath.Join(path, prog)
 	}
 	// Config file
 	if cfgFile != "" {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		// Search config in XDG_CONFIG_HOME directory with name prog (without extension).
-		viper.AddConfigPath(configHome)
-		viper.SetConfigType("yaml")
-		viper.SetConfigName(prog)
+		for i := len(configPaths) - 1; i >= 0; i-- {
+			viper.AddConfigPath(configPaths[i])
+		}
 	}
-	//Environment variables
+	// Set cgroups, types, rules and database paths
+	for _, name := range []string{"cgroups", "types", "rules", "database"} {
+		viper.SetDefault(name, filepath.Join(viper.GetString("cachedir"), name))
+	}
+	// Allow use of environment variables
 	viper.SetEnvPrefix(prog)
 	viper.AutomaticEnv() // read in environment variables that match
 	// Default values
-	viper.SetDefault(
-		"confdirs",
-		[]string{
-			path.Join(configHome, prog),
-			path.Join("/usr/local/etc", prog),
-			path.Join("/etc", prog),
-		},
-	)
-	viper.SetDefault("libdir", path.Join("/usr/lib", prog))
+	viper.SetDefault("confdirs", configPaths)
+	viper.SetDefault("libdir", filepath.Join("/usr/lib", prog))
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil && viper.GetBool("debug") {
 		printErrln("Using config file:", viper.ConfigFileUsed())
 	}
 	// Debug
 	if viper.GetBool("debug") {
-		viper.WriteConfigAs(path.Join(viper.GetString("runtimedir"), "viper.yaml"))
+		viper.WriteConfigAs(filepath.Join(viper.GetString("runtimedir"), "viper.yaml"))
 	}
 	// Provide SUDO environment variable to jq scripts.
 	os.Setenv("SUDO", viper.GetString("sudo"))
@@ -170,9 +206,6 @@ func initConfig() {
 	if viper.GetBool("debug") {
 		printErrln("Current process has these caps:", cap.GetProc())
 	}
-
-	// rootCmd.SetOut(os.Stdout)
-	// rootCmd.SetErr(os.Stderr)
 }
 
 func init() {

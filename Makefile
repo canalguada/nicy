@@ -71,7 +71,7 @@ install-lib:
 
 install-conf:
 	install -d $(DESTDIR)$(confdir)/rules.d
-	install -m644 conf/environment $(DESTDIR)$(confdir)/
+	install -m644 conf/config.yaml $(DESTDIR)$(confdir)/
 	sed -i 's#%prefix%#$(prefix)#g' $(DESTDIR)$(confdir)/environment
 	install -m644 conf/00-cgroups.cgroups $(DESTDIR)$(confdir)/
 	install -m644 conf/00-types.types $(DESTDIR)$(confdir)/

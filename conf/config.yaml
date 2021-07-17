@@ -1,33 +1,28 @@
-# Set path to jq implementation
-# JQ_PATH=$(command -v jq)
-
 # Set user, if any, then global directories for configuration files
-# NICY_CONF=( "$HOME/.config/nicy" "/usr/local/etc/nicy" "/etc/nicy")
-
-# Set nicy read-only data directory
-# NICY_DATA="%prefix%/share/nicy"
+# confdirs:
+# - "~/.config/nicy"
+# - "/usr/local/etc/nicy"
+# - "/etc/nicy"
 
 # Set nicy read-only library directory
-# NICY_LIB="%prefix%/lib/nicy"
+# libdir: "/usr/lib/nicy"
 
 # Show what command is launched and some more information from systemd-run
-# NICY_VERBOSE="y"
+# verbose: false
 
 # Use this shell when writing scripts
-# NICY_SHELL=/bin/bash
+# shell: "/bin/sh"
 
 # Use this command when root-credentials are required
-# NICY_SUDO=sudo
+# sudo: "sudo"
 
 # Use this path to install scripts
-# Non privilegied user
-# NICY_SCRIPTS="$HOME/bin/nicy"
+# scripts: "~/bin/nicy"
 # Superuser
-# NICY_SCRIPTS="/usr/local/bin/nicy"
+# scripts: "/usr/local/bin/nicy"
 
 # Ignore the commands listed in this file when installing scripts
-# NICY_IGNORE="${NICY_CONF[0]}/ignore"
+# ignore: "~/.config/nicy/ignore"
 
 # Symlink the scripts of the corresponding commands listed in this file after installing them
-# NICY_SYMLINK="${NICY_CONF[0]}/symlink"
-
+# symlink: "~/.config/nicy/symlink"

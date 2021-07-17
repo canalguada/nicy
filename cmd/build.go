@@ -34,19 +34,17 @@ var buildCmd = &cobra.Command{
 		debugOutput(cmd)
 
 		// Real job goes here
-		// TODO: Remove extension once debug done
 		cacheFile := viper.GetString("database")
 		if !(exists(cacheFile)) || viper.GetBool("force") {
 			cacheContent := make(map[string]interface{}, 4)
 			cacheContent["date"] = timestamp()
 			for _, category := range [3]string{"cgroups", "types", "rules"} {
-				// TODO: Remove extension once debug done
 				file := viper.GetString(category)
 				if !(exists(file)) || viper.GetBool("force") {
 					// Dump content of configuration files into category cache file
 					result := make([]interface{}, 0, 128)
 					for _, root := range viper.GetStringSlice("confdirs") {
-						objects, err := dumpObjects(category, root)
+						objects, err := dumpObjects(category, expandPath(root))
 						checkErr(err)
 						result = append(result, objects...)
 					}
