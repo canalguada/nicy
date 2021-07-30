@@ -2,58 +2,6 @@ module { "name": "manage" };
 
 include "./common" ;
 
-def requests:
-  [
-    "pid",
-    "ppid",
-    "pgrp",
-    "uid",
-    "user",
-    "state",
-    "slice",
-    "unit",
-    "comm",
-    "cgroup",
-    "priority",
-    "nice",
-    "num_threads",
-    "rtprio",
-    "policy",
-    "oom_score_adj",
-    "ioclass",
-    "ionice"
-  ]
-  as $fields
-  | map(
-    . as $stat
-    | reduce range(0; length) as $pos (
-      {} ; .  + { "\($fields[$pos])": $stat[$pos] }
-    )
-  )
-  | rule_names as $names
-  | .[]
-  # Filter comm without rule
-  # TODO: Find better test
-  | select([.comm] | _inside($names))
-  # Raw pid status entries
-  | .
-  + { "sched": ["other", "fifo", "rr", "batch", "iso", "idle"][.policy] }
-  + (
-    .comm
-    | {
-      "request": (
-        fake_values($shell; $nproc; $max_nice)
-        | map(tostring)
-        | build_request
-      ),
-      "entries": {
-        "cred": []
-      },
-      "diff": {}
-    }
-  ) ;
-
-
 def get_runtime_entries:
   rule_names as $names
   | .[]
@@ -198,9 +146,9 @@ def stream_runtime_adjust:
         "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
         "StartTransientUnit", "'ssa(sv)a(sa(sv))'",
         "\(scope_unit)", "fail", count,
-        "PIDs", "au", "\($processes | length)"
+        "PIDs", "au", ($processes | "\(length)", (map(tostring) |join(" ")))
       ]
-      + $processes + slice_part + ["0"]
+      + slice_part + ["0"]
     )
     | del(.pids."\($processes[])".diff.cgroup) ;
 
@@ -244,9 +192,9 @@ def stream_runtime_adjust:
     | .pids."\($lpid)" as $hash
     | service_properties($hash) as $service_properties
     # Adjust each property with its own command.
-    # Set the properties of the leaf service not set the inner nodes' ones. If
-    # the cgroup controller for one property is not available, because managed
-    # in some slice, another property can still be set when not requiring it.
+    # Set the properties of the leaf service. Don't deal with inner nodes. If
+    # the cgroup controller for one property is not available, yet managed in
+    # some slice, another property can still be set if not requiring it.
     | .pids."\($lpid)" |= add_command([
       sudo_prefix, "systemctl", user_or_not, "--runtime",
       "set-property", "\(unit)", $service_properties[]
@@ -307,42 +255,45 @@ def stream_runtime_adjust:
       end
     )
     | .[]
-    | "adjusting comm:\(.[1]) pgrp:\(.[0]) cgroup:\(.[2]) pids:\(.[3]|map(tostring)|join(" "))"
-    as $msg
-    | [ "echo", "\($msg)" ], .[4][]
-    | (map(@sh) | join(" "))
+    # | "adjusting comm:\(.[1]) pgrp:\(.[0]) cgroup:\(.[2]) pids:\(.[3]|map(tostring)|join(" "))"
+    # as $msg
+    # | [ "echo", "\($msg)" ], .[4][]
+    # | (map(@sh) | join(" "))
+    | { "Pgrp": .[0], "Comm": .[1], "Unit": .[2], "Pids": .[3], "Commands": .[4] }
+    # | "\(.)"
   else halt end ;
 
 
 def manage_runtime:
-  [
-    "pid",
-    "ppid",
-    "pgrp",
-    "uid",
-    "user",
-    "state",
-    "slice",
-    "unit",
-    "comm",
-    "cgroup",
-    "priority",
-    "nice",
-    "num_threads",
-    "rtprio",
-    "policy",
-    "oom_score_adj",
-    "ioclass",
-    "ionice"
-  ]
-  as $fields
-  | map(
-    . as $stat
-    | reduce range(0; length) as $pos (
-      {} ; .  + { "\($fields[$pos])": $stat[$pos] }
-    )
-  )
-  | stream_runtime_adjust ;
+  # [
+  #   "pid",
+  #   "ppid",
+  #   "pgrp",
+  #   "uid",
+  #   "user",
+  #   "state",
+  #   "slice",
+  #   "unit",
+  #   "comm",
+  #   "cgroup",
+  #   "priority",
+  #   "nice",
+  #   "num_threads",
+  #   "rtprio",
+  #   "policy",
+  #   "oom_score_adj",
+  #   "ioclass",
+  #   "ionice"
+  # ]
+  # as $fields
+  # | map(
+  #   . as $stat
+  #   | reduce range(0; length) as $pos (
+  #     {} ; .  + { "\($fields[$pos])": $stat[$pos] }
+  #   )
+  # )
+  # | stream_runtime_adjust ;
+  stream_runtime_adjust ;
 
 
 # vim: set ft=jq fdm=indent ai ts=2 sw=2 tw=79 et:

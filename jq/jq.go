@@ -48,6 +48,10 @@ func NewRequest(script string, vars []string, values ...interface{}) *Request {
 	}
 }
 
+type emptyError interface {
+	IsEmptyError() bool
+}
+
 func (req *Request) Output(input []interface{}) (output []interface{}, err error) {
 	if len(req.Script) == 0 {
 		// Identity filter
@@ -78,7 +82,10 @@ func (req *Request) Output(input []interface{}) (output []interface{}, err error
 			break
 		}
 		if err, ok = v.(error); ok {
-			if err != nil {
+			if e, ok := v.(emptyError); ok && e.IsEmptyError() {
+				err = nil
+				break
+			} else if err != nil {
 				return
 			}
 		}

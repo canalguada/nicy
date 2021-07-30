@@ -17,9 +17,9 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"os"
+	// "os"
 	"github.com/canalguada/nicy/process"
-	flag "github.com/spf13/pflag"
+	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -32,16 +32,15 @@ var dumpCmd = &cobra.Command{
 	Args: cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		fs := cmd.LocalNonPersistentFlags()
-		err := checkConsistency(fs,
-			[]string{"user", "global", "system", "all"})
-		if err != nil {
-			return err
+		var slices = map[int][]string{
+			0: []string{"user", "global", "system", "all"},
+			1: []string{"json", "raw", "nicy"},
 		}
-		err = checkConsistency(fs,
-			[]string{"json", "raw", "nicy"})
-		if err != nil {
-			return err
+		fs := cmd.LocalNonPersistentFlags()
+		for key := range slices {
+			if err := checkConsistency(fs, slices[key]); err != nil {
+				return err
+			}
 		}
 		return nil
 	},
@@ -54,27 +53,19 @@ var dumpCmd = &cobra.Command{
 		var message string
 		switch {
 		case viper.GetBool("user"):
-			filterFunc = func(p *process.Proc) bool {
-				return p.Uid == os.Getuid() && p.InUserSlice()
-			}
+			filterFunc = process.GetFilter("user")
 			message = "calling user processes"
 		case viper.GetBool("global"):
-			filterFunc = func(p *process.Proc) bool {
-				return p.InUserSlice()
-			}
+			filterFunc = process.GetFilter("global")
 			message = "processes inside any user slice"
 		case viper.GetBool("system"):
-			filterFunc = func(p *process.Proc) bool {
-				return p.InSystemSlice()
-			}
+			filterFunc = process.GetFilter("system")
 			message = "processes inside system slice"
 		case viper.GetBool("all"):
-			filterFunc = nil
+			filterFunc = process.GetFilter("all")
 			message = "all processes"
 		default:
-			filterFunc = func(p *process.Proc) bool {
-				return p.Uid == os.Getuid() && p.InUserSlice()
-			}
+			filterFunc = process.GetFilter("user")
 			message = "calling user processes"
 		}
 		if viper.GetBool("verbose") {
@@ -82,21 +73,13 @@ var dumpCmd = &cobra.Command{
 		}
 		switch {
 		case viper.GetBool("json"):
-			formatterFunc = func(p *process.Proc) string {
-				return p.Json()
-			}
+			formatterFunc = process.GetFormatter("json")
 		case viper.GetBool("raw"):
-			formatterFunc = func(p *process.Proc) string {
-				return p.Raw()
-			}
-		case viper.GetBool("nicy"):
-			formatterFunc = func(p *process.Proc) string {
-				return p.Values()
-			}
+			formatterFunc = process.GetFormatter("raw")
+		case viper.GetBool("values"):
+			formatterFunc = process.GetFormatter("values")
 		default:
-			formatterFunc = func(p *process.Proc) string {
-				return p.String()
-			}
+			formatterFunc = process.GetFormatter("string")
 		}
 		for _, p := range process.AllProcs(filterFunc) {
 			cmd.Println(formatterFunc(&p))
@@ -105,7 +88,7 @@ var dumpCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.AddCommand(dumpCmd)
+	// rootCmd.AddCommand(dumpCmd)
 
 	// Here you will define your flags and configuration settings.
 
@@ -115,26 +98,29 @@ func init() {
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fs := dumpCmd.Flags()
-	fs.SortFlags = false
-	fs.SetInterspersed(false)
+	fsDump := dumpCmd.Flags()
+	fsDump.SortFlags = false
+	fsDump.SetInterspersed(false)
 
-	fsFilter := flag.NewFlagSet("filter flags", flag.ExitOnError)
-	fsFilter.SortFlags = false
-	fsFilter.BoolP("user", "u", false, "only processes running inside calling user slice")
-	fsFilter.BoolP("global", "g", false, "processes running inside any user slice")
-	fsFilter.BoolP("system", "s", false, "only processes running inside system slice")
-	fsFilter.BoolP("all", "a", false, "all running processes")
-	fs.AddFlagSet(fsFilter)
+	fsDump.BoolP("user", "u", false, "only processes running inside calling user slice")
+	fsDump.BoolP("global", "g", false, "processes running inside any user slice")
+	fsDump.BoolP("system", "s", false, "only processes running inside system slice")
+	fsDump.BoolP("all", "a", false, "all running processes")
 
-	fsFormatter := flag.NewFlagSet("filter flags", flag.ExitOnError)
-	fsFormatter.SortFlags = false
-	fsFormatter.BoolP("raw", "r", false, "use raw format")
-	fsFormatter.BoolP("json", "j", false, "use json format")
-	fsFormatter.BoolP("nicy", "n", false, "use nicy format")
-	fs.AddFlagSet(fsFormatter)
+	// fsFormatter := flag.NewFlagSet("local format flags", flag.ExitOnError)
+	// fsFormatter.SortFlags = false
+	// fsFormatter.BoolP("raw", "r", false, "use raw format")
+	// fsFormatter.BoolP("json", "j", false, "use json format")
+	// fsFormatter.BoolP("nicy", "n", false, "use nicy format")
+	// fsDump.AddFlagSet(fsFormatter)
+  //
+	// viper.BindPFlags(fsFormatter)
 
-	viper.BindPFlags(fs)
+	fsDump.BoolP("raw", "r", false, "use raw format")
+	fsDump.BoolP("json", "j", false, "use json format")
+	fsDump.BoolP("values", "v", false, "use nicy format")
+
+	viper.BindPFlags(fsDump)
 
 	dumpCmd.InheritedFlags().SortFlags = false
 }

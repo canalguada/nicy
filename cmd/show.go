@@ -21,7 +21,7 @@ import (
 	// "os"
 	// "strings"
 	// "github.com/google/shlex"
-	flag "github.com/spf13/pflag"
+	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -56,11 +56,14 @@ func CommonPreRunE(cmd *cobra.Command, args []string) error {
 var showCmd = &cobra.Command{
 	Use:   "show [-q|-v] [--preset PRESET|-d|-z] [--cgroup CGROUP|--cpu QUOTA] [-m] [-u] COMMAND",
 	Short: "Show effective script for given command",
-	Long: `Show the effective script for the given COMMAND`,
+	Long: `Show the effective script for the given COMMAND
+
+The PRESET argument can be: 'auto' to use some specific rule for the command, if available; 'cgroup-only' to use only the cgroup properties of that rule, if any; 'default' to use this special fallback preset; or any other generic type. The CGROUP argument can be a cgroup defined in configuration files. The QUOTA argument can be an integer ranging from 1 to 99 that represents a percentage relative to the total CPU time available on all cores.`,
 	Args: cobra.MinimumNArgs(1),
 	DisableFlagsInUseLine: true,
 	PreRunE: CommonPreRunE,
 	Run: func(cmd *cobra.Command, args []string) {
+		viper.Set("tag", "show")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
@@ -78,11 +81,14 @@ var showCmd = &cobra.Command{
 var runCmd = &cobra.Command{
 	Use:   "run [-n] [-q|-v] [--preset PRESET|-d|-z] [--cgroup CGROUP|--cpu QUOTA] [-m] [-u] COMMAND [ARGUMENT]...",
 	Short: "Run given command in pre-set execution environment",
-	Long: `Run the COMMAND in a pre-set execution environment`,
+	Long: `Run the COMMAND with its ARGUMENT(S) in a pre-set execution environment
+
+The PRESET argument can be: 'auto' to use some specific rule for the command, if available; 'cgroup-only' to use only the cgroup properties of that rule, if any; 'default' to use this special fallback preset; or any other generic type. The CGROUP argument can be a cgroup defined in configuration files. The QUOTA argument can be an integer ranging from 1 to 99 that represents a percentage relative to the total CPU time available on all cores.`,
 	Args: cobra.MinimumNArgs(1),
 	DisableFlagsInUseLine: true,
 	PreRunE: CommonPreRunE,
 	Run: func(cmd *cobra.Command, args []string) {
+		viper.Set("tag", "run")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
@@ -100,63 +106,17 @@ var runCmd = &cobra.Command{
 				cmd.PrintErrln(err)
 			}
 		}()
-		for _, cmdline := range script.RuntimeCommands(args) {
-			disableAmbient := false
-			if cmdline[0] == "$SUDO" && viper.GetInt("UID") != 0 {
-				err := setAmbientSysNice(true)
-				if err != nil {
-					// Fallback to sudo command if CAP_SYS_NICE not in local ambient set
-					cmdline[0] = viper.GetString("sudo")
-					cmd.PrintErrln(err)
-				} else {
-					cmdline.ShrinkLeft(1)
-					disableAmbient = true
-				}
-			}
-			if viper.GetBool("dry-run") || (viper.GetInt("verbose") > 0) {
-				// Write to stderr which command lines would be run
-				cmd.PrintErrln(prog + ":", "run:", cmdline)
-			}
-			if viper.GetBool("dry-run") {
-				goto ResetAmbient
-			}
-			if cmdline[0] == "exec" {
-				err = cmdline.ExecRun()
-				checkErr(err)
+		for _, cmdline := range script.RunCmdLines(args) {
 			// Run command and do not abort on error
-			} else if err := cmdline.Run(nil, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+			if err := cmdline.Run(nil, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 				cmd.PrintErrln(err)
 			}
-			// Finally
-			ResetAmbient:
-				if disableAmbient {
-					if err := setAmbientSysNice(false); err != nil {
-						cmd.PrintErrln(err)
-					}
-				}
 		}
 	},
 }
 
-var fsRunShow *flag.FlagSet
-
 func init() {
-	fsRunShow = flag.NewFlagSet("run and show flags", flag.ExitOnError)
-	fsRunShow.SortFlags = false
-	fsRunShow.BoolP("quiet", "q", false, "suppress additional output")
-	fsRunShow.CountP("verbose", "v", "display which command is launched")
-	fsRunShow.StringP("preset", "p", "auto", "apply this `PRESET`")
-	fsRunShow.BoolP("default", "d", false, "like --preset=default")
-	fsRunShow.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
-	fsRunShow.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
-	fsRunShow.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
-	fsRunShow.BoolP("managed", "m", false, "always run inside its own scope")
-	fsRunShow.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
-	viper.BindPFlags(fsRunShow)
-}
-
-func init() {
-	rootCmd.AddCommand(showCmd)
+	// rootCmd.AddCommand(showCmd)
 
 	// Here you will define your flags and configuration settings.
 
@@ -170,13 +130,23 @@ func init() {
 	fsShow.SortFlags = false
 	fsShow.SetInterspersed(false)
 
-	fsShow.AddFlagSet(fsRunShow)
+	fsShow.BoolP("quiet", "q", false, "suppress additional output")
+	fsShow.CountP("verbose", "v", "display which command is launched")
+	fsShow.StringP("preset", "p", "auto", "apply this `PRESET`")
+	fsShow.BoolP("default", "d", false, "like --preset=default")
+	fsShow.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
+	fsShow.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
+	fsShow.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
+	fsShow.BoolP("managed", "m", false, "always run inside its own scope")
+	fsShow.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
+	viper.BindPFlags(fsShow)
+	// fsShow.AddFlagSet(fsRunShow)
 
 	showCmd.InheritedFlags().SortFlags = false
 }
 
 func init() {
-	rootCmd.AddCommand(runCmd)
+	// rootCmd.AddCommand(runCmd)
 
 	// Here you will define your flags and configuration settings.
 
@@ -189,11 +159,20 @@ func init() {
 	fsRun := runCmd.Flags()
 	fsRun.SortFlags = false
 	fsRun.SetInterspersed(false)
-	fsRun.BoolP("dry-run", "n", false, "display commands but do not run them")
 
+	fsRun.BoolP("quiet", "q", false, "suppress additional output")
+	fsRun.CountP("verbose", "v", "display which command is launched")
+	fsRun.StringP("preset", "p", "auto", "apply this `PRESET`")
+	fsRun.BoolP("default", "d", false, "like --preset=default")
+	fsRun.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
+	fsRun.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
+	fsRun.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
+	fsRun.BoolP("managed", "m", false, "always run inside its own scope")
+	fsRun.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
+	// fsRun.AddFlagSet(fsRunShow)
+	// fsRun.BoolP("dry-run", "n", false, "display commands but do not run them")
+	// fsRun.AddFlagSet(fsRunManage)
 	viper.BindPFlags(fsRun)
-
-	fsRun.AddFlagSet(fsRunShow)
 
 	runCmd.InheritedFlags().SortFlags = false
 }

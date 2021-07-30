@@ -28,9 +28,12 @@ import (
 	"sort"
 	"encoding/json"
 	"time"
+	"github.com/canalguada/nicy/process"
 	"github.com/canalguada/nicy/jq"
 	"github.com/spf13/viper"
 )
+
+// Build command
 
 // readDirNames reads the directory named by dirname and returns a sorted list
 // of directory entries.
@@ -225,6 +228,37 @@ func readCategoryCache(category string) (cache []interface{}, err error) {
 	return
 }
 
+// List command
+
+func listObjects(category string) (output []interface{}, err error) {
+	var input []interface{}
+	// Prepare input
+	if viper.IsSet("from") {
+		input = []interface{}{viper.Get("from")}
+	} else {
+		slice := viper.GetStringSlice("confdirs")
+		input = make([]interface{}, len(slice))
+		for i, path := range slice {
+			input[i] = expandPath(path)
+		}
+	}
+	// Prepare variables
+	cachedb, err := readCache()
+	checkErr(err)
+
+	req := jq.NewRequest(
+		`include "list"; list`,
+		[]string{"$cachedb", "$kind"},
+		cachedb,
+		strings.TrimRight(category, "s"),
+	)
+	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
+	output, err = req.Output(input)
+	return
+}
+
+// Run and show commands
+
 func lookPath(command string) (result string, err error) {
 	result, err = exec.LookPath(command)
 	if err != nil {
@@ -309,11 +343,16 @@ func findValidPath(command string) (valid string, err error) {
 }
 
 func yieldScriptFrom(shell string, args []string) (Script, error) {
+	// Prepare variables
 	cachedb, err := readCache()
 	if err != nil {
 		return nil, err
 	}
-	req := jq.NewRequest(`include "run"; run`, []string{"$cachedb"}, cachedb)
+	// TODO: Yield json arrays
+	req := jq.NewRequest(
+		`include "run"; run`,
+		[]string{"$cachedb"},
+		cachedb)
 	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
 	// Prepare input
 	command, err := findValidPath(args[0])
@@ -322,24 +361,47 @@ func yieldScriptFrom(shell string, args []string) (Script, error) {
 	}
 	input := NewJqInput(command)
 	input.Shell = filepath.Base(shell)
-	// Get result
-	result, err := req.Output(input.Slice())
+	// Get output
+	output, err := req.Output(input.Slice())
 	switch {
 	case err != nil:
 		return nil, err
-	case result[0] != "commands":
-		return nil, fmt.Errorf("%w: %v", ErrInvalid, result[1:])
+	case output[0] != "commands":
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, output[1:])
 	}
-	lines := result[1:]
-	script := make([]CmdLine, len(lines))
-	for i, data := range lines {
-		s, ok := data.(string)
-		if !(ok) {
-			checkErr(fmt.Errorf("%w: not a string: %v", ErrInvalid, data))
-		}
-		script[i] = NewCommandLine(s)
+	output = output[1:]
+	script, err := DecodeScript(output)
+	checkErr(err)
+	return NewShellScript(shell, script...), nil
+}
+
+// Manage command
+
+func streamProcAdjust(filterFunc process.Filter) (objects []interface{}, err error) {
+	// Prepare variables
+	cachedb, err := readCache()
+	checkErr(err)
+	req := jq.NewRequest(
+		`include "manage"; manage_runtime`,
+		[]string{"$cachedb", "$nproc", "$max_nice", "$uid", "$shell"},
+		cachedb,
+		numCPU(),
+		int(rlimitNice().Max),
+		viper.GetInt("UID"),
+		"/bin/sh",
+	)
+	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
+	// Prepare input
+	input := JqManageInput{}
+	for _, p :=range process.AllProcs(filterFunc) {
+		input.Append(&p)
 	}
-	return NewScript(shell, script...), nil
+	// Get result
+	objects, err = req.Output(input.Objects())
+	if err != nil {
+		err = fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

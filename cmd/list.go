@@ -18,69 +18,41 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
-	"path"
-	"github.com/canalguada/nicy/jq"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 // listCmd represents the list command
 var listCmd = &cobra.Command{
-	Use:   "list [--from=directory] category",
+	Use:   "list [--from=DIRECTORY] CATEGORY",
 	Short: "List json objects",
-	Long: `List the objects from cgroups, types or rules category, removing all duplicates`,
+	Long: `List the objects from cgroups, types or rules CATEGORY, removing all duplicates
+
+The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching the extensions of configuration files. The DIRECTORY argument can be one out of preconfigured directories. When filtering per DIRECTORY, no duplicate is removed taking into account the priority between all of them.`,
 	ValidArgs: []string{"cgroups", "types", "rules"},
 	Args: cobra.ExactValidArgs(1),
 	DisableFlagsInUseLine: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Debug output
 		w := debugOutput(cmd)
-
 		// Real job goes here
-		var confdirs []interface{}
-
-		// Prepare input
-		if viper.IsSet("from") {
-			confdirs = []interface{}{viper.Get("from")}
-		} else {
-			slice := viper.GetStringSlice("confdirs")
-			confdirs = make([]interface{}, len(slice))
-			for i, path := range slice {
-				confdirs[i] = expandPath(path)
-			}
-		}
-		// Prepare variables
-		cachedb, err := readCache()
+		output, err := listObjects(args[0])
 		checkErr(err)
 
 		w.Init(cmd.OutOrStdout(), 8, 8, 0, '\t', 0)
 		defer w.Flush()
 
-		req := jq.NewRequest(
-			`include "list"; list`,
-			[]string{"$cachedb", "$kind"},
-			cachedb,
-			strings.TrimRight(args[0], "s"),
-		)
-		req.LibDirs = []string{path.Join(expandPath(viper.GetString("libdir")), "jq")}
-		output, err := req.Output(confdirs)
-		checkErr(err)
-
 		if viper.GetBool("no-headers") {
-			for _, line := range output[1:] {
-				fmt.Fprintln(w, line)
-			}
-		} else {
-			for _, line := range output {
-				fmt.Fprintln(w, line)
-			}
+			output = output[1:]
+		}
+		for _, line := range output {
+			fmt.Fprintln(w, line)
 		}
 	},
 }
 
 func init() {
-	rootCmd.AddCommand(listCmd)
+	// rootCmd.AddCommand(listCmd)
 
 	// Here you will define your flags and configuration settings.
 
@@ -94,7 +66,7 @@ func init() {
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
 
-	fs.StringP("from", "f", "", "list only objects from confdir `directory`")
+	fs.StringP("from", "f", "", "list only objects from `DIRECTORY`")
 	fs.BoolP("no-headers", "n", false, "do not print headers")
 
 	viper.BindPFlags(fs)

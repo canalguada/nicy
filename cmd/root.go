@@ -66,6 +66,42 @@ func Execute() {
 	checkErr(rootCmd.Execute())
 }
 
+// // Shared flag sets
+//
+// var fsRunShow, fsRunManage, fsManageDump *flag.FlagSet
+//
+// func init() {
+//   fsRunShow = flag.NewFlagSet("run and show flags", flag.ExitOnError)
+//   fsRunShow.SortFlags = false
+//   fsRunShow.BoolP("quiet", "q", false, "suppress additional output")
+//   fsRunShow.CountP("verbose", "v", "display which command is launched")
+//   fsRunShow.StringP("preset", "p", "auto", "apply this `PRESET`")
+//   fsRunShow.BoolP("default", "d", false, "like --preset=default")
+//   fsRunShow.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
+//   fsRunShow.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
+//   fsRunShow.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
+//   fsRunShow.BoolP("managed", "m", false, "always run inside its own scope")
+//   fsRunShow.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
+//   viper.BindPFlags(fsRunShow)
+// }
+//
+// func init() {
+//   fsRunManage = flag.NewFlagSet("run and manage flags", flag.ExitOnError)
+//   fsRunManage.SortFlags = false
+//   fsRunManage.BoolP("dry-run", "n", false, "display commands but do not run them")
+//   viper.BindPFlags(fsRunManage)
+// }
+//
+// func init() {
+//   fsManageDump = flag.NewFlagSet("manage and dump flags", flag.ExitOnError)
+//   fsManageDump.SortFlags = false
+//   fsManageDump.BoolP("user", "u", false, "only processes running inside calling user slice")
+//   fsManageDump.BoolP("global", "g", false, "processes running inside any user slice")
+//   fsManageDump.BoolP("system", "s", false, "only processes running inside system slice")
+//   fsManageDump.BoolP("all", "a", false, "all running processes")
+//   viper.BindPFlags(fsManageDump)
+// }
+
 func init() {
 	cobra.OnInitialize(initConfig)
 
@@ -78,6 +114,7 @@ func init() {
 	fs.StringSlice("confdirs", []string{}, "user and system presets `directories`")
 	fs.String("libdir", "", "read-only library `directory`")
 	fs.BoolP("debug", "D", false, "show debug output")
+	fs.BoolP("dry-run", "n", false, "display commands but do not run them")
 
 	fs.MarkHidden("confdirs")
 	fs.MarkHidden("libdir")
@@ -91,6 +128,19 @@ func init() {
 	// when this action is called directly.
 	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	rootCmd.Flags().SortFlags = false
+}
+
+// Commands
+
+func init() {
+	cobra.EnableCommandSorting = false
+
+	rootCmd.AddCommand(buildCmd)
+	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(showCmd)
+	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(dumpCmd)
+	rootCmd.AddCommand(manageCmd)
 }
 
 func printErrln(a ...interface{}) (n int, err error){
@@ -214,6 +264,8 @@ func init() {
 	viper.SetDefault("sudo", "sudo")
 	// Use kernel.org/pub/linux/libs/security/libcap/cap
 }
+
+// More functions
 
 func setCapabilities(enable bool) error {
 	c := cap.GetProc()

@@ -361,6 +361,49 @@ func (p *Proc) Values() string {
 	)
 }
 
+func (p *Proc) Map() map[string]interface{} {
+	parts := strings.Split(p.Cgroup, "/")
+	obj := make(map[string]interface{}, 18)
+	// TODO: Rename keys in jq library to match Proc struct
+	// obj["Pid"] = p.Pid
+	// obj["Ppid"] = p.Ppid
+	// obj["Pgrp"] = p.Pgrp
+	// obj["Uid"] = p.Uid
+	// obj["User"] = p.User
+	// obj["State"] = p.State
+	// obj["Slice"] = parts[1]
+	// obj["Unit"] = parts[len(parts) - 1]
+	// obj["Comm"] = p.Comm
+	// obj["Cgroup"] = p.Cgroup
+	// obj["Priority"] = p.Priority
+	// obj["Nice"] = p.Nice
+	// obj["NumThreads"] = p.NumThreads
+	// obj["RTPrio"] = p.RTPrio
+	// obj["Policy"] = p.Policy
+	// obj["OomScoreAdj"] = p.OomScoreAdj
+	// obj["IOPrioClass"] = IO.Class[p.IOPrioClass]
+	// obj["IOPrioData"] = p.IOPrioData
+	obj["pid"] = p.Pid
+	obj["ppid"] = p.Ppid
+	obj["pgrp"] = p.Pgrp
+	obj["uid"] = p.Uid
+	obj["user"] = p.User
+	obj["state"] = p.State
+	obj["slice"] = parts[1]
+	obj["unit"] = parts[len(parts) - 1]
+	obj["comm"] = p.Comm
+	obj["cgroup"] = p.Cgroup
+	obj["priority"] = p.Priority
+	obj["nice"] = p.Nice
+	obj["num_threads"] = p.NumThreads
+	obj["rtprio"] = p.RTPrio
+	obj["policy"] = p.Policy
+	obj["oom_score_adj"] = p.OomScoreAdj
+	obj["ioclass"] = IO.Class[p.IOPrioClass]
+	obj["ionice"] = p.IOPrioData
+	return obj
+}
+
 func (p *Proc) InUserSlice() bool {
 	return strings.Contains(p.Cgroup, "/user.slice/")
 }
@@ -376,8 +419,50 @@ func Stat(stat string) string {
 }
 
 type Filter func(p *Proc) bool
+
+var (
+	filterUser = func(p *Proc) bool {
+		return p.Uid == os.Getuid() && p.InUserSlice()
+	}
+	filterGlobal = func(p *Proc) bool {
+		return p.InUserSlice()
+	}
+	filterSystem = func(p *Proc) bool {
+		return p.InSystemSlice()
+	}
+	filterAll = func(p *Proc) bool {
+		return true
+	}
+)
+
+func GetFilter(what string) Filter {
+	switch strings.ToLower(what) {
+	case "user":
+		return filterUser
+	case "global":
+		return filterGlobal
+	case "system":
+		return filterSystem
+	case "all":
+		return filterAll
+	}
+	return filterUser
+}
+
 type Formatter func (p *Proc) string
 
+func GetFormatter(format string) Formatter {
+	switch strings.ToLower(format) {
+	case "json":
+		return func(p *Proc) string { return p.Json() }
+	case "raw":
+		return func(p *Proc) string { return p.Raw() }
+	case "values":
+		return func(p *Proc) string { return p.Values() }
+	default:
+		return func(p *Proc) string { return p.String() }
+	}
+}
 // AllProcs returns a list of all currently available processes.
 // Filters result with filterFunc, if not nil.
 func AllProcs(filterFunc Filter) (result []Proc) {

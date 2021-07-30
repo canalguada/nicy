@@ -573,7 +573,7 @@ def process_env:
   if has_entry("env") then
     if .use_scope then .
     else
-      add_command(["export"] + _("env"))
+      add_command(["export"] + (_("env") | object_to_array))
       | del_entry("env")
     end
   else . end ;
@@ -649,7 +649,7 @@ def get_commands:
         | del_entry("nice")
       else . end
       | if has_entry("env") then
-        append_to_command((_("env") | map("-E", "\(.)")))
+        append_to_command((_("env") | object_to_array | map("-E", "\(.)")))
         | del_entry("env")
       else . end
     # No scope unit required
