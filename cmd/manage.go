@@ -17,7 +17,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"fmt"
+	// "fmt"
 	// "os"
 	// "strings"
 	// "encoding/json"
@@ -43,6 +43,8 @@ The processes are managed per process group, when a specific rule is available f
 		if err := checkConsistency(fs, slice); err != nil {
 			return err
 		}
+		// Bind shared flags
+		bindFlags(cmd, "user", "global", "system", "all", "dry-run")
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -84,34 +86,7 @@ The processes are managed per process group, when a specific rule is available f
 					cmd.PrintErrln(err)
 				}
 			}()
-			for _, json := range jobs {
-				obj, ok := json.(map[string]interface{})
-				if !(ok) {
-					checkErr(fmt.Errorf("%w: not a valid object: %v", ErrInvalid, json))
-					continue
-				}
-				// Extract job per process group
-				job := NewJqManageOutput(&obj)
-				cmd.PrintErrln(
-					prog + ":",
-					viper.GetString("tag"),
-					fmt.Sprintf(
-						"comm:%s pgrp:%d cgroup:%s pids:%v",
-						job.Comm,
-						job.Pgrp,
-						job.Unit,
-						job.Pids,
-					),
-				)
-				// Finally run commands
-				stdout := cmd.OutOrStdout()
-				stderr := cmd.ErrOrStderr()
-				for _, cmdline := range Script(job.Commands).ManageCmdLines() {
-					if err := cmdline.Run(nil, stdout, stderr); err != nil {
-						cmd.PrintErrln(err)
-					}
-				}
-			}
+			runProcAdjust(jobs, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		}
 	},
 }
@@ -127,17 +102,12 @@ func init() {
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fsManage := manageCmd.Flags()
-	fsManage.SortFlags = false
-	fsManage.SetInterspersed(false)
+	fs := manageCmd.Flags()
+	fs.SortFlags = false
+	fs.SetInterspersed(false)
 
-	fsManage.BoolP("user", "u", false, "only processes running inside calling user slice")
-	fsManage.BoolP("global", "g", false, "processes running inside any user slice")
-	fsManage.BoolP("system", "s", false, "only processes running inside system slice")
-	fsManage.BoolP("all", "a", false, "all running processes")
-	// fsManage.BoolP("dry-run", "n", false, "display commands but do not run them")
-
-	viper.BindPFlags(fsManage)
+	addDumpManageFlags(manageCmd)
+	addDryRunFlag(manageCmd)
 
 	manageCmd.InheritedFlags().SortFlags = false
 }

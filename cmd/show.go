@@ -39,6 +39,12 @@ func CommonPreRunE(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// Bind shared flags
+	bindFlags(
+		cmd,
+		"dry-run", "quiet", "verbose", "preset", "default",
+		"cgroup-only", "cgroup", "cpu", "managed", "force-cgroup",
+	)
 	// Set runtime values where needed
 	switch {
 	case fs.Changed("default"):
@@ -47,7 +53,7 @@ func CommonPreRunE(cmd *cobra.Command, args []string) error {
 		viper.Set("preset", "cgroup-only")
 	}
 	if fs.Changed("cpu") {
-		viper.Set("cgroup", viper.GetString("cpu"))
+		viper.Set("cgroup", "cpu" + viper.GetString("cpu"))
 	}
 	return nil
 }
@@ -108,7 +114,7 @@ The PRESET argument can be: 'auto' to use some specific rule for the command, if
 		}()
 		for _, cmdline := range script.RunCmdLines(args) {
 			// Run command and do not abort on error
-			if err := cmdline.Run(nil, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+			if err := cmdline.Run("", nil, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 				cmd.PrintErrln(err)
 			}
 		}
@@ -126,21 +132,11 @@ func init() {
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fsShow := showCmd.Flags()
-	fsShow.SortFlags = false
-	fsShow.SetInterspersed(false)
+	fs := showCmd.Flags()
+	fs.SortFlags = false
+	fs.SetInterspersed(false)
 
-	fsShow.BoolP("quiet", "q", false, "suppress additional output")
-	fsShow.CountP("verbose", "v", "display which command is launched")
-	fsShow.StringP("preset", "p", "auto", "apply this `PRESET`")
-	fsShow.BoolP("default", "d", false, "like --preset=default")
-	fsShow.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
-	fsShow.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
-	fsShow.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
-	fsShow.BoolP("managed", "m", false, "always run inside its own scope")
-	fsShow.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
-	viper.BindPFlags(fsShow)
-	// fsShow.AddFlagSet(fsRunShow)
+	addRunShowFlags(showCmd)
 
 	showCmd.InheritedFlags().SortFlags = false
 }
@@ -156,23 +152,12 @@ func init() {
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fsRun := runCmd.Flags()
-	fsRun.SortFlags = false
-	fsRun.SetInterspersed(false)
+	fs := runCmd.Flags()
+	fs.SortFlags = false
+	fs.SetInterspersed(false)
 
-	fsRun.BoolP("quiet", "q", false, "suppress additional output")
-	fsRun.CountP("verbose", "v", "display which command is launched")
-	fsRun.StringP("preset", "p", "auto", "apply this `PRESET`")
-	fsRun.BoolP("default", "d", false, "like --preset=default")
-	fsRun.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
-	fsRun.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
-	fsRun.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
-	fsRun.BoolP("managed", "m", false, "always run inside its own scope")
-	fsRun.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
-	// fsRun.AddFlagSet(fsRunShow)
-	// fsRun.BoolP("dry-run", "n", false, "display commands but do not run them")
-	// fsRun.AddFlagSet(fsRunManage)
-	viper.BindPFlags(fsRun)
+	addRunShowFlags(runCmd)
+	addDryRunFlag(runCmd)
 
 	runCmd.InheritedFlags().SortFlags = false
 }

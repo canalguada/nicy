@@ -5,8 +5,9 @@ include "./common" ;
 
 def dump($kind; $dirs):
   [ $cachedb."\($kind)s"[]
-    |select(.origin|in_array($dirs))
-  ] | (if $kind == "rule" then "name" else "\($kind)" end) as $key
+    | select(.origin | within($dirs))
+  ]
+  | (if $kind == "rule" then "name" else "\($kind)" end) as $key
   | unique_by(."\($key)")
   | map([."\($key)", "\(del(.origin))"]) as $rows
   | ["\($key)", "content"] as $cols

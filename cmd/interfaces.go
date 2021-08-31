@@ -19,158 +19,114 @@ package cmd
 import (
 	"fmt"
 	"path/filepath"
-	"reflect"
+	"io"
+	"encoding/json"
 	"github.com/canalguada/nicy/process"
 	"github.com/spf13/viper"
 )
 
 
-type JqInput struct {
-	Name string
-	Path string
-	Preset string
-	Cgroup string
-	ForceCgroup bool
-	Managed bool
-	Quiet bool
-	Verbosity int
-	Shell string
-	NumCPU int
-	MaxNice int
-	SchedRTPrio string
-	SchedIOPrio string
+type RunInput struct {
+	Name string					`json:"name"`
+	Path string					`json:"cmd"`
+	Preset string				`json:"preset"`
+	Cgroup string				`json:"cgroup"`
+	ForceCgroup bool		`json:"probe_cgroup"`
+	Managed bool				`json:"managed"`
+	Quiet bool					`json:"quiet"`
+	Verbosity int				`json:"verbosity"`
+	Shell string				`json:"shell"`
+	NumCPU int					`json:"nproc"`
+	MaxNice int					`json:"max_nice"`
+	CPUSched string			`json:"cpusched"`
+	IOSched string			`json:"iosched"`
 }
 
-func NewJqInput(command string) *JqInput {
+func NewRunInput(cmdPath string) *RunInput {
 	p := process.GetCalling()
-	policy := process.CPU.Class[p.Policy]
-	cpuinfo := fmt.Sprintf(
-		"PID  %d: PRIO   %d, POLICY %c: %s",
-		p.Pid, p.RTPrio, policy[6], policy,
-	)
-	ioinfo := fmt.Sprintf(
-		"%s: prio %d", process.IO.Class[p.IOPrioClass], p.IOPrioData)
-	return &JqInput{
-		Name: filepath.Base(command),
-		Path: command,
+	return &RunInput{
+		Name: filepath.Base(cmdPath),
+		Path: cmdPath,
 		Preset: viper.GetString("preset"),
 		Cgroup: viper.GetString("cgroup"),
 		ForceCgroup: viper.GetBool("force-cgroup"),
 		Managed: viper.GetBool("managed"),
 		Quiet: viper.GetBool("quiet"),
-		Verbosity: viper.GetInt("verbose"),
+		//TODO: Update jq library
+		Verbosity: 1,
 		Shell: filepath.Base(viper.GetString("shell")),
 		NumCPU: numCPU(),
 		MaxNice: int(rlimitNice().Max),
-		SchedRTPrio: cpuinfo,
-		SchedIOPrio: ioinfo,
+		CPUSched: p.CPUSchedInfo(),
+		IOSched: p.IOSchedInfo(),
 	}
 }
 
-func (input *JqInput) Slice() []interface{} {
-	slice := make([]interface{}, 13)
-	valueOf := reflect.ValueOf(*input)
-	for i := 0; i< valueOf.NumField(); i++ {
-		switch valueOf.Field(i).Type() {
-		case reflect.TypeOf("string"):
-			slice[i] = valueOf.Field(i).Interface()
-		case reflect.TypeOf(true):
-			slice[i] = fmt.Sprintf("%t", valueOf.Field(i).Interface())
-		case reflect.TypeOf(10):
-			slice[i] = fmt.Sprintf("%d", valueOf.Field(i).Interface())
-		}
-	}
-	return slice
+func (input *RunInput) Map() map[string]interface{} {
+	data, err := json.Marshal(*input)
+	checkErr(err)
+	result := make(map[string]interface{})
+	checkErr(json.Unmarshal(data, &result))
+	return result
 }
 
-
-type JqManageInput struct {
-	// pid int
-	// ppid int
-	// pgrp int
-	// uid int
-	// user string
-	// state string
-	// slice string
-	// unit string
-	// comm string
-	// cgroup string
-	// priority int
-	// nice int
-	// num_threads int
-	// rtprio int
-	// policy int
-	// oom_score_adj int
-	// ioclass string
-	// ionice int
-	objects []interface{}
+type ManageInput struct {
+	procmaps []interface{}
 }
 
-func (input *JqManageInput) Append(p *process.Proc) error {
-	input.objects = append(input.objects, p.Map())
+func (input *ManageInput) Append(p *process.Proc) error {
+	input.procmaps = append(input.procmaps, p.Map())
 	return nil
 }
 
-func (input *JqManageInput) Objects() []interface{} {
-	return input.objects
+func (input *ManageInput) Slice() []interface{} {
+	s := make([]interface{}, len(input.procmaps))
+	copy(s, input.procmaps)
+	return s
 }
 
-type JqManageOutput struct {
-	Pgrp int
-	Comm string
-	Unit string
-	Pids []int
-	Commands []CmdLine
+type ManageJob struct {
+	Pgrp int						`json:"Pgrp"`
+	Comm string					`json:"Comm"`
+	Unit string					`json:"Unit"`
+	Pids []int					`json:"Pids"`
+	Commands []CmdLine	`json:"Commands"`
 }
 
-func (out *JqManageOutput) Append(lines ...CmdLine) {
-	out.Commands = append(out.Commands, lines...)
+func (job *ManageJob) Append(lines ...CmdLine) {
+	job.Commands = append(job.Commands, lines...)
 }
 
-func NewJqManageOutput(obj *map[string]interface{}) *JqManageOutput {
-	out := &JqManageOutput{}
-	for k, v := range *obj {
-		switch {
-		case k == "Pgrp":
-			if v, ok := v.(int); ok {
-				out.Pgrp = v
-			}
-		case k == "Comm":
-			if v, ok := v.(string); ok {
-				out.Comm = v
-			}
-		case k == "Unit":
-			if v, ok := v.(string); ok {
-				out.Unit = v
-			}
-		case k == "Pids":
-			if v, ok := v.([]interface{}); ok {
-				for _, v := range v {
-					if v, ok := v.(int); ok {
-						out.Pids = append(out.Pids, v)
-					}
-				}
-			}
-		case k == "Commands":
-			if lines, err := DecodeScript(v); err == nil {
-				out.Commands = append(out.Commands, lines...)
-			}
-			// if v, ok := v.([]interface{}); ok {
-			//   for _, vs := range v {
-			//     if vs, ok := vs.([]interface{}); ok {
-			//       var line CmdLine
-			//       for _, s := range vs {
-			//         if s, ok := s.(string); ok && len(s) > 0 {
-			//           line = append(line, s)
-			//         }
-			//       }
-			//       out.Append(line)
-			//     }
-			//   }
-			// }
+func NewManageJob(obj *map[string]interface{}) *ManageJob {
+	job := &ManageJob{}
+	if data, err := json.Marshal(*obj); err == nil {
+		checkErr(json.Unmarshal(data, job))
+	}
+	return job
+}
+
+func (job *ManageJob) Run(stdout, stderr io.Writer) {
+	// Set job tag
+	tag := fmt.Sprintf("%s[%d]", job.Comm, job.Pgrp)
+	fmt.Fprintln(
+		stderr,
+		prog + ":",
+		viper.GetString("tag") + ":",
+		tag + ":",
+		fmt.Sprintf(
+			"cgroup:%s pids:%v",
+			job.Unit,
+			job.Pids,
+		),
+	)
+	// Finally run commands
+	for _, cmdline := range Script(job.Commands).ManageCmdLines() {
+		if err := cmdline.Run(tag, nil, stdout, stderr); err != nil {
+			// Loop exit on error
+			fmt.Fprintln(stderr, err)
+			break
 		}
 	}
-	return out
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

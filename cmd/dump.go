@@ -42,6 +42,12 @@ var dumpCmd = &cobra.Command{
 				return err
 			}
 		}
+		// Bind shared flags
+		bindFlags(
+			cmd,
+			"user", "global", "system", "all",
+			"raw", "json", "values",
+		)
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -98,29 +104,15 @@ func init() {
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fsDump := dumpCmd.Flags()
-	fsDump.SortFlags = false
-	fsDump.SetInterspersed(false)
+	fs := dumpCmd.Flags()
+	fs.SortFlags = false
+	fs.SetInterspersed(false)
 
-	fsDump.BoolP("user", "u", false, "only processes running inside calling user slice")
-	fsDump.BoolP("global", "g", false, "processes running inside any user slice")
-	fsDump.BoolP("system", "s", false, "only processes running inside system slice")
-	fsDump.BoolP("all", "a", false, "all running processes")
+	addDumpManageFlags(dumpCmd)
 
-	// fsFormatter := flag.NewFlagSet("local format flags", flag.ExitOnError)
-	// fsFormatter.SortFlags = false
-	// fsFormatter.BoolP("raw", "r", false, "use raw format")
-	// fsFormatter.BoolP("json", "j", false, "use json format")
-	// fsFormatter.BoolP("nicy", "n", false, "use nicy format")
-	// fsDump.AddFlagSet(fsFormatter)
-  //
-	// viper.BindPFlags(fsFormatter)
-
-	fsDump.BoolP("raw", "r", false, "use raw format")
-	fsDump.BoolP("json", "j", false, "use json format")
-	fsDump.BoolP("values", "v", false, "use nicy format")
-
-	viper.BindPFlags(fsDump)
+	fs.BoolP("raw", "r", false, "use raw format")
+	fs.BoolP("json", "j", false, "use json format")
+	fs.BoolP("values", "v", false, "use nicy format")
 
 	dumpCmd.InheritedFlags().SortFlags = false
 }

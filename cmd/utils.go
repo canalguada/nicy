@@ -22,12 +22,15 @@ import (
 	"os/exec"
 	"bufio"
 	"regexp"
+	"io"
 	"io/ioutil"
 	"path/filepath"
 	"strings"
 	"sort"
 	"encoding/json"
 	"time"
+	"runtime"
+	"sync"
 	"github.com/canalguada/nicy/process"
 	"github.com/canalguada/nicy/jq"
 	"github.com/spf13/viper"
@@ -253,7 +256,7 @@ func listObjects(category string) (output []interface{}, err error) {
 		strings.TrimRight(category, "s"),
 	)
 	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
-	output, err = req.Output(input)
+	output, err = req.Result(input)
 	return
 }
 
@@ -287,7 +290,7 @@ func findExecutable(file string) error {
 // If file contains a slash, it is tried directly and the PATH is not consulted.
 // The result may be an absolute path or a path relative to the current directory.
 func lookAll(file string) (result []string, err error) {
-	if strings.Contains(file, "/") {
+	if strings.Contains(file, string(filepath.Separator)) {
 		e := findExecutable(file)
 		if e == nil {
 			result = append(result, file)
@@ -313,32 +316,27 @@ func lookAll(file string) (result []string, err error) {
 }
 
 func findValidPath(command string) (valid string, err error) {
-	basename := filepath.Base(command)
-  // Strip suffix, if any
-	basename = strings.TrimSuffix(basename, ".nicy")
-  // Set an absolute path for the final command
-	prefix := expandPath(viper.GetString("scripts"))
-	which, err := lookPath(basename)
-	if err != nil {
-		return
-	}
-	which, _ = filepath.EvalSymlinks(which)
-	if command == basename || strings.HasPrefix(which, prefix) {
-		var paths []string
-		// Not a valid absolute path
-		paths, err = lookAll(command)
+	if strings.Contains(command, string(filepath.Separator)) {
+		// Set an absolute path
+		command, err = filepath.Abs(command)
 		if err != nil {
 			return
 		}
-		for _, path := range paths {
-			if strings.HasPrefix(path, prefix) {
-				continue
-			}
-			valid = path
-			return
-		}
 	}
-	valid = command
+	paths, err := lookAll(command)
+	if err != nil {
+		return
+	}
+	prefix := expandPath(viper.GetString("scripts"))
+	for _, path := range paths {
+		realpath, _ := filepath.EvalSymlinks(path)
+		if strings.HasPrefix(realpath, prefix) {
+			continue
+		}
+		valid = realpath
+		return
+	}
+	err = fmt.Errorf("%w: \"%v\": valid executable file not found in $PATH", ErrInvalid, command)
 	return
 }
 
@@ -348,7 +346,6 @@ func yieldScriptFrom(shell string, args []string) (Script, error) {
 	if err != nil {
 		return nil, err
 	}
-	// TODO: Yield json arrays
 	req := jq.NewRequest(
 		`include "run"; run`,
 		[]string{"$cachedb"},
@@ -359,10 +356,10 @@ func yieldScriptFrom(shell string, args []string) (Script, error) {
 	if err != nil {
 		return nil, err
 	}
-	input := NewJqInput(command)
+	input := NewRunInput(command)
 	input.Shell = filepath.Base(shell)
 	// Get output
-	output, err := req.Output(input.Slice())
+	output, err := req.Result(input.Map())
 	switch {
 	case err != nil:
 		return nil, err
@@ -392,16 +389,54 @@ func streamProcAdjust(filterFunc process.Filter) (objects []interface{}, err err
 	)
 	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
 	// Prepare input
-	input := JqManageInput{}
+	input := ManageInput{}
 	for _, p :=range process.AllProcs(filterFunc) {
 		input.Append(&p)
 	}
 	// Get result
-	objects, err = req.Output(input.Objects())
+	objects, err = req.Result(input.Slice())
 	if err != nil {
 		err = fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	return
 }
+
+func runProcAdjust(objects []interface{}, stdout, stderr io.Writer) {
+	// make our channel for communicating work
+	jobs := make(chan ManageJob, len(objects))
+	// spin up workers and use a sync.WaitGroup to indicate completion
+	var count = runtime.GOMAXPROCS(0)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(jobs <-chan ManageJob, wg *sync.WaitGroup){
+			defer wg.Done()
+			// Do work on job here
+			for job := range jobs {
+				job.Run(stdout, stderr)
+			}
+		}(jobs, &wg)
+	}
+	// start sending jobs
+	go func() {
+		defer close(jobs)
+		for _, json := range objects {
+			obj, ok := json.(map[string]interface{})
+			if !(ok) {
+				// Skip if not valid object
+				fmt.Fprintf(stderr, "not a valid object: %#v\n", json)
+				continue
+			}
+			// TODO: Remove after debug
+			// fmt.Fprintf(stderr, "%#v\n", obj)
+			// Extract job per process group
+			jobs <- *NewManageJob(&obj)
+		}
+	}()
+	// wait on the workers to finish
+	wg.Wait()
+}
+
+// TODO: Install command
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

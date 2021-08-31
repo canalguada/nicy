@@ -3,14 +3,28 @@ module { "name": "run" };
 include "./common" ;
 
 
-# Expects request values as string array
+# Expects request values as object
+# {
+#   "name": "name",
+#   "cmd": "/path/to/command",
+#   "preset": "auto",
+#   "cgroup": "",
+#   "probe_cgroup": false,
+#   "managed": false,
+#   "Quiet": true,
+#   "Verbosity": 0,
+#   "Shell": "/path/to/shell",
+#   "nproc": 1,
+#   "max_nice": 20,
+#   "cpusched": "0:other:0",
+#   "iosched": "0:none:0"
+# }
+#
 def run:
-  map(jsonify)
-  | get_input
+  get_input
   | get_entries
   | get_commands
   | if has("error") then "error", .error
-  # else "commands", (.commands[] | (map(@sh) | join(" "))) end ;
   else "commands", .commands[] end ;
 
 

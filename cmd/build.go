@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"encoding/json"
+	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -29,10 +30,14 @@ var buildCmd = &cobra.Command{
 	Long: `Build the json cache and exit`,
 	Args: cobra.ExactArgs(0),
 	DisableFlagsInUseLine: true,
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		// Bind flag
+		bindFlags(cmd, "force")
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Debug output
 		debugOutput(cmd)
-
 		// Real job goes here
 		cacheFile := viper.GetString("database")
 		if !(exists(cacheFile)) || viper.GetBool("force") {
@@ -92,8 +97,6 @@ func init() {
 	fs.SetInterspersed(false)
 
 	fs.BoolP("force", "f", false, "ignore existing files in cache")
-
-	viper.BindPFlags(fs)
 
 	buildCmd.InheritedFlags().SortFlags = false
 }

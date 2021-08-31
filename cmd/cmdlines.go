@@ -58,12 +58,15 @@ func NewCmdLine(line string) CmdLine {
 }
 
 func (line CmdLine) RequireSysNice() bool {
+	var pos int
 	if line[0] == "$SUDO" {
-		for _, c := range []string{"renice", "chrt", "ionice"} {
-				if line[1] == c {
-					return true
-				}
-		}
+		pos = 1
+	}
+	// Always set flag for the following system utilies
+	for _, c := range []string{"renice", "chrt", "ionice"} {
+			if line[pos] == c {
+				return true
+			}
 	}
 	return false
 }
@@ -91,26 +94,6 @@ func (line *CmdLine) Append(args ...string) {
 	*line = slice
 }
 
-// func (line *CmdLine) ShrinkLeft(count uint) {
-//   if int(count) >= (len(*line) - 1) {
-//     *line = CmdLine{}
-//   } else {
-//     slice := *line
-//     slice = slice[count:]
-//     *line = slice
-//   }
-// }
-
-// func (line *CmdLine) ShrinkRight(count uint) {
-//   if int(count) >= (len(*line) - 1) {
-//     *line = CmdLine{}
-//   } else {
-//     slice := *line
-//     slice = slice[:len(*line) - int(count)]
-//     *line = slice
-//   }
-// }
-
 func (line CmdLine) String() string {
 	return strings.TrimSpace(strings.Join(line, " "))
 }
@@ -125,32 +108,27 @@ func (line CmdLine) Output() (output []string, err error) {
 	return
 }
 
-func (line CmdLine) UnprivilegedRun(stdin io.Reader, stdout, stderr io.Writer) error {
+func (line CmdLine) unprivilegedRun(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
 	args := CmdLine(line[:])
 	if args[len(args) - 1] == ">/dev/null" {
 		stdout = nil
 		args = args[:len(args) - 1]
 	}
-	if viper.GetBool("dry-run") {
+	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+		var s = []interface{}{prog + ":", viper.GetString("tag") + ":"}
+		if len(tag) > 0 {
+			s = append(s, tag + ":")
+		}
+		if viper.GetBool("dry-run") {
+			s = append(s, "dry-run:")
+		}
+		s = append(s, args.String())
 		// Write to stderr what would be run
-		fmt.Fprintln(
-			stderr,
-			prog + ":",
-			viper.GetString("tag") + ":",
-			"dry-run:",
-			args,
-		)
-	} else if viper.GetInt("verbose") > 0 {
-		// Write to stderr what would be run
-		fmt.Fprintln(
-			stderr,
-			prog + ":",
-			viper.GetString("tag") + ":",
-			args,
-		)
-	}
-	if viper.GetBool("dry-run") {
-		return nil
+		fmt.Fprintln(stderr, s...)
+		// Return if dry-run
+		if viper.GetBool("dry-run") {
+			return nil
+		}
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = stdin
@@ -181,7 +159,7 @@ func (line CmdLine) ExecRun() error {
 			command,
 			line[pos + 1:],
 		)
-	} else if viper.GetInt("verbose") > 0 {
+	} else if viper.GetBool("verbose") {
 		// Write to stderr what would be run
 		fmt.Fprintln(
 			os.Stderr,
@@ -208,8 +186,11 @@ func (line CmdLine) WriteVerboseTo(dest io.Writer) (n int, err error) {
 	return
 }
 
-func (line CmdLine) Run(stdin io.Reader, stdout, stderr io.Writer) error {
+func (line CmdLine) Run(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
 	disableAmbient := false
+	if len(line) == 0 {
+		goto Empty
+	}
 	defer func() {
 		if disableAmbient {
 			if err := setAmbientSysNice(false); err != nil {
@@ -217,35 +198,48 @@ func (line CmdLine) Run(stdin io.Reader, stdout, stderr io.Writer) error {
 			}
 		}
 	}()
-	for ; line[0] == "$SUDO" ; {
-		if viper.GetInt("UID") != 0 {
-			if line.RequireSysNice() {
-				if err := setAmbientSysNice(true); err == nil {
-					disableAmbient = true
-					// Discard `$SUDO` if CAP_SYS_NICE in local ambient set
-					goto Discard
-				} else {
-					fmt.Fprintln(stderr, err)
-				}
+	if viper.GetInt("UID") == 0 {
+		// Discard `$SUDO` for superuser if present
+		goto Discard
+	} else if line.RequireSysNice() {
+			if err := setAmbientSysNice(true); err == nil {
+				disableAmbient = true
+				// Discard `$SUDO` if present and CAP_SYS_NICE in local ambient set
+				goto Discard
+			} else {
+				fmt.Fprintln(stderr, err)
+				goto Fallback
 			}
-		} else {
-			// Discard `$SUDO` for superuser
-			goto Discard
-		}
-		// Fallback to sudo
-		line[0] = viper.GetString("sudo")
-		break
-		Discard:
+	} else {
+		// Fallback to sudo if required
+		goto Fallback
+	}
+
+	Discard:
+		if line[0] == "$SUDO" {
 			line = line[1:]
-	}
-	if line[0] == "exec" {
-		// Do not propagate capabilities
-		if err := setCapabilities(false); err != nil {
-			fmt.Fprintln(stderr, err)
 		}
-		return line.ExecRun()
-	}
-	return line.UnprivilegedRun(stdin, stdout, stderr)
+		goto Run
+	Fallback:
+		if line[0] == "$SUDO" {
+			line[0] = viper.GetString("sudo")
+		}
+
+	Run:
+		if len(line) == 0 {
+			goto Empty
+		}
+		if line[0] == "exec" {
+			// Do not propagate capabilities
+			if err := setCapabilities(false); err != nil {
+				fmt.Fprintln(stderr, err)
+			}
+			return line.ExecRun()
+		}
+		return line.unprivilegedRun(tag, stdin, stdout, stderr)
+
+	Empty:
+		return fmt.Errorf("%w: empty command line", ErrInvalid)
 }
 
 func (line CmdLine) Trace(tag string) {
@@ -254,10 +248,20 @@ func (line CmdLine) Trace(tag string) {
 	}
 }
 
-func (line CmdLine) Trim() {
-	for ; len(line) > 0 && len(line[0]) == 0 ; {
-		line = line[1:]
+type LineFilter func(token string) bool
+
+var Empty LineFilter = func(token string) bool {
+	return len(token) == 0
+}
+
+func (line *CmdLine) Filter(f LineFilter) {
+	var buf CmdLine
+	for _, token := range *line {
+		if !(f(token)) {
+			buf = append(buf, token)
+		}
 	}
+	*line = buf
 }
 
 func (line CmdLine) Command() (command string) {
@@ -301,20 +305,9 @@ func DecodeScript(input interface{}) (script Script, err error) {
 }
 
 func NewShellScript(shell string, lines ...CmdLine) (script Script) {
-	// result := make([]CmdLine, len(lines) + 1)
-	// result[0] = CmdLine{"#!" + shell}
-	// for i, line := range lines {
-	//   if len(line) > 0 {
-	//     result[i + 1] = line
-	//     if line[0] == "exec" {
-	//       result[i + 1].Append(`"$@"`)
-	//     }
-	//   }
-	// }
-	// return Script(result)
 	script.Append(CmdLine{"#!" + shell})
 	for _, line := range lines {
-		line.Trim()
+		line.Filter(Empty)
 		if len(line) > 0 {
 			if line[0] == "exec" {
 				// Append first "$@"

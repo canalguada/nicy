@@ -66,41 +66,40 @@ func Execute() {
 	checkErr(rootCmd.Execute())
 }
 
-// // Shared flag sets
-//
-// var fsRunShow, fsRunManage, fsManageDump *flag.FlagSet
-//
-// func init() {
-//   fsRunShow = flag.NewFlagSet("run and show flags", flag.ExitOnError)
-//   fsRunShow.SortFlags = false
-//   fsRunShow.BoolP("quiet", "q", false, "suppress additional output")
-//   fsRunShow.CountP("verbose", "v", "display which command is launched")
-//   fsRunShow.StringP("preset", "p", "auto", "apply this `PRESET`")
-//   fsRunShow.BoolP("default", "d", false, "like --preset=default")
-//   fsRunShow.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
-//   fsRunShow.StringP("cgroup", "c", "null", "run as part of this `CGROUP`")
-//   fsRunShow.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
-//   fsRunShow.BoolP("managed", "m", false, "always run inside its own scope")
-//   fsRunShow.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
-//   viper.BindPFlags(fsRunShow)
-// }
-//
-// func init() {
-//   fsRunManage = flag.NewFlagSet("run and manage flags", flag.ExitOnError)
-//   fsRunManage.SortFlags = false
-//   fsRunManage.BoolP("dry-run", "n", false, "display commands but do not run them")
-//   viper.BindPFlags(fsRunManage)
-// }
-//
-// func init() {
-//   fsManageDump = flag.NewFlagSet("manage and dump flags", flag.ExitOnError)
-//   fsManageDump.SortFlags = false
-//   fsManageDump.BoolP("user", "u", false, "only processes running inside calling user slice")
-//   fsManageDump.BoolP("global", "g", false, "processes running inside any user slice")
-//   fsManageDump.BoolP("system", "s", false, "only processes running inside system slice")
-//   fsManageDump.BoolP("all", "a", false, "all running processes")
-//   viper.BindPFlags(fsManageDump)
-// }
+// Flags
+
+func addRunShowFlags(cmd *cobra.Command) {
+	fs := cmd.Flags()
+	fs.BoolP("quiet", "q", false, "suppress additional output")
+	fs.BoolP("verbose", "v", false, "be verbose when running external commands")
+	fs.StringP("preset", "p", "auto", "apply this `PRESET`")
+	fs.BoolP("default", "d", false, "like --preset=default")
+	fs.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
+	fs.StringP("cgroup", "c", "", "run as part of this `CGROUP`")
+	fs.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
+	fs.BoolP("managed", "m", false, "always run inside its own scope")
+	fs.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
+}
+
+func addDryRunFlag(cmd *cobra.Command) {
+	fs := cmd.Flags()
+	fs.BoolP("dry-run", "n", false, "display external commands instead running them")
+}
+
+func addDumpManageFlags(cmd *cobra.Command) {
+	fs := cmd.Flags()
+	fs.BoolP("user", "u", false, "only processes running inside calling user slice")
+	fs.BoolP("global", "g", false, "processes running inside any user slice")
+	fs.BoolP("system", "s", false, "only processes running inside system slice")
+	fs.BoolP("all", "a", false, "all running processes")
+}
+
+func bindFlags(cmd *cobra.Command, names ...string) {
+	fs := cmd.Flags()
+	for _, name := range names {
+		viper.BindPFlag(name, fs.Lookup(name))
+	}
+}
 
 func init() {
 	cobra.OnInitialize(initConfig)
@@ -111,11 +110,9 @@ func init() {
 	fs := rootCmd.PersistentFlags()
 	fs.StringVar(&cfgFile, "config", "", "config `file`")
 
-	fs.StringSlice("confdirs", []string{}, "user and system presets `directories`")
-	fs.String("libdir", "", "read-only library `directory`")
+	fs.StringSlice("confdirs", []string{}, "user and system presets directories")
+	fs.String("libdir", "", "read-only library directory")
 	fs.BoolP("debug", "D", false, "show debug output")
-	fs.BoolP("dry-run", "n", false, "display commands but do not run them")
-
 	fs.MarkHidden("confdirs")
 	fs.MarkHidden("libdir")
 	fs.MarkHidden("debug")
@@ -141,6 +138,7 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(dumpCmd)
 	rootCmd.AddCommand(manageCmd)
+	rootCmd.AddCommand(installCmd)
 }
 
 func printErrln(a ...interface{}) (n int, err error){
@@ -242,6 +240,7 @@ func initConfig() {
 	// Default values
 	viper.SetDefault("confdirs", configPaths)
 	viper.SetDefault("libdir", filepath.Join("/usr/lib", prog))
+	viper.SetDefault("shell", "/bin/sh")
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil && viper.GetBool("debug") {
 		printErrln("Using config file:", viper.ConfigFileUsed())

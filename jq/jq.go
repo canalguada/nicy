@@ -34,6 +34,7 @@ type Request struct {
 	Variables []string
 	Values []interface{}
 	IterFunc func(value interface{}) interface{}
+	code *gojq.Code
 }
 
 func NewRequest(script string, vars []string, values ...interface{}) *Request {
@@ -52,7 +53,10 @@ type emptyError interface {
 	IsEmptyError() bool
 }
 
-func (req *Request) Output(input []interface{}) (output []interface{}, err error) {
+func (req *Request) Compile(force bool) (err error){
+	if !(force) && req.code != nil {
+		return
+	}
 	if len(req.Script) == 0 {
 		// Identity filter
 		req.Script = "."
@@ -75,7 +79,21 @@ func (req *Request) Output(input []interface{}) (output []interface{}, err error
 		err = fmt.Errorf("%w: %v", ErrCompile, err)
 		return
 	}
-	iter := code.Run(input, req.Values...)
+	req.code = code
+	return nil
+}
+
+func (req *Request) Code() (code *gojq.Code, err error) {
+	if req.code == nil {
+		if err = req.Compile(true); err != nil {
+			return
+		}
+	}
+	code = req.code
+	return
+}
+
+func (req *Request) iterate(iter gojq.Iter) (result []interface{}, err error) {
 	for {
 		v, ok := iter.Next()
 		if !ok {
@@ -89,9 +107,37 @@ func (req *Request) Output(input []interface{}) (output []interface{}, err error
 				return
 			}
 		}
-		output = append(output, req.IterFunc(v))
+		result = append(result, req.IterFunc(v))
 	}
 	return
+}
+
+func (req *Request) runQuery(input interface{}) (result []interface{}, err error) {
+	if len(req.Script) == 0 {
+		// Identity filter
+		req.Script = "."
+	}
+	query, err := gojq.Parse(req.Script)
+	if err != nil {
+		err = fmt.Errorf("%w: %v", ErrUsage, err)
+		return
+	}
+	return req.iterate(query.Run(interface{}(input)))
+}
+
+func (req *Request) runCode(input interface{}) (result []interface{}, err error) {
+	if err = req.Compile(false); err != nil {
+		return
+	}
+	return req.iterate(req.code.Run(interface{}(input), req.Values...))
+}
+
+func (req *Request) Result(input interface{}) ([]interface{}, error) {
+	return req.runCode(interface{}(input))
+}
+
+func (req *Request) QueryOnlyResult(input interface{}) ([]interface{}, error) {
+	return req.runQuery(interface{}(input))
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

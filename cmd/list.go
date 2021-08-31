@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"fmt"
+	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -32,6 +33,11 @@ The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching the extensi
 	ValidArgs: []string{"cgroups", "types", "rules"},
 	Args: cobra.ExactValidArgs(1),
 	DisableFlagsInUseLine: true,
+	PreRunE: func(cmd *cobra.Command, args []string) error {
+		// Bind flags
+		bindFlags(cmd, "from", "no-headers")
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Debug output
 		w := debugOutput(cmd)
@@ -68,8 +74,6 @@ func init() {
 
 	fs.StringP("from", "f", "", "list only objects from `DIRECTORY`")
 	fs.BoolP("no-headers", "n", false, "do not print headers")
-
-	viper.BindPFlags(fs)
 
 	listCmd.InheritedFlags().SortFlags = false
 }
