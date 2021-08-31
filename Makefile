@@ -3,7 +3,7 @@ DESTDIR		?=
 package		= nicy
 program		= nicy
 git_branch	= golang
-version		= 0.1.5
+version		= 0.1.6
 revision	= 1
 release_dir	= ..
 release_file	= $(release_dir)/$(package)-$(version)
@@ -44,7 +44,12 @@ man:
 	# cd $(package)-$(version) && \
 	# debmake -b"$(package):bin" -u"$(version)" -r"$(revision)" && \
 	# debuild
-	# [WIP] Build with dh-make-golang make -force-prerelease  -git_revision $(git_branch) -type p github.com/canalguada/nicy
+
+deb:
+	# [WIP] Prepare with dh-make-golang make -force_prerelease  -git_revision $(git_branch) -type p github.com/canalguada/nicy
+	# To build the package, commit the packaging and use gbp buildpackage:
+	# git add debian && git commit -S -m 'Initial packaging'
+	gbp buildpackage --git-pbuilder
 
 dist:
 	git archive --format=tar.gz \

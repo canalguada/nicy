@@ -25,7 +25,6 @@ Files:     conf/*
 	   debian/*
 	   lib/*
 	   man/*
-	   scripts/*
            Makefile
            README.md
            CONFIGURATION.md
