@@ -38,3 +38,6 @@ https://github.com/canalguada/nicy/tags .*/v(\d[\d\.]*)\.(?:tar.gz|tar.bz2|tar.x
 # ".asc" suffix using the "pgpsigurlmangle" option.
 # opts=<options> <Webpage URL> <string match>
 #opts=pgpsigurlmangle=s/$/.asc/ http://ftp.example.org/nicy/download.html pub/nicy-([\d\.]*)\.(?:tar.gz|tar.bz2|tar.xz)
+opts="filenamemangle=s%(?:.*?)?v?(\d[\d.]*)\.tar\.gz%@PACKAGE@-$1.tar.gz%,\
+      uversionmangle=s/(\d)[_\.\-\+]?(RC|rc|pre|dev|beta|alpha)[.]?(\d*)$/$1~$2$3/" \
+  https://github.com/canalguada/nicy/tags .*/v?(\d\S*)\.tar\.gz debian
