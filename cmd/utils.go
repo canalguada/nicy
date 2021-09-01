@@ -330,11 +330,10 @@ func findValidPath(command string) (valid string, err error) {
 	prefix := expandPath(viper.GetString("scripts"))
 	for _, path := range paths {
 		realpath, _ := filepath.EvalSymlinks(path)
-		if strings.HasPrefix(realpath, prefix) {
-			continue
+		if ! strings.HasPrefix(realpath, prefix) {
+			valid = realpath
+			return
 		}
-		valid = realpath
-		return
 	}
 	err = fmt.Errorf("%w: \"%v\": valid executable file not found in $PATH", ErrInvalid, command)
 	return

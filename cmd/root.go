@@ -221,6 +221,13 @@ func initConfig() {
 	for i, path := range configPaths {
 		configPaths[i] = filepath.Join(path, prog)
 	}
+	// Default install path for scripts
+	if uid != 0 {
+		path = filepath.Join(viper.GetString("HOME"), "bin", prog)
+	} else {
+		path = filepath.Join("/usr/local/bin", prog)
+	}
+	viper.SetDefault("scripts", path)
 	// Config file
 	if cfgFile != "" {
 		// Use config file from the flag.
