@@ -40,19 +40,21 @@ The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching the extensi
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Debug output
-		w := debugOutput(cmd)
+		debugOutput(cmd)
 		// Real job goes here
 		output, err := listObjects(args[0])
 		checkErr(err)
 
-		w.Init(cmd.OutOrStdout(), 8, 8, 0, '\t', 0)
-		defer w.Flush()
+		tw := getTabWriter(cmd.OutOrStdout())
+		// To update writer
+		// tw.Init(cmd.OutOrStdout(), 8, 8, 0, '\t', 0)
+		defer tw.Flush()
 
 		if viper.GetBool("no-headers") {
 			output = output[1:]
 		}
 		for _, line := range output {
-			fmt.Fprintln(w, line)
+			fmt.Fprintln(tw, line)
 		}
 	},
 }

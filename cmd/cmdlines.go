@@ -79,7 +79,7 @@ func (line CmdLine) Runtime(pid, uid int) CmdLine {
 			if uid != 0 {
 				runtime[i] = "--user"
 			} else {
-				runtime[i] = ""
+				runtime[i] = "--system"
 			}
 		case strings.Contains(arg, "$$"):
 			runtime[i] = strings.Replace(arg, "$$", strconv.Itoa(pid), 1)
@@ -89,9 +89,15 @@ func (line CmdLine) Runtime(pid, uid int) CmdLine {
 }
 
 func (line *CmdLine) Append(args ...string) {
-	slice := *line
-	slice = append(slice, args...)
-	*line = slice
+	line.Extend(CmdLine(args))
+}
+
+func (line *CmdLine) Extend(other CmdLine) {
+	other.Filter(Empty)
+	buf := make([]string, len(*line), len(*line) + len(other))
+	_ = copy(buf, *line)
+	buf = append(buf, other...)
+	*line = buf
 }
 
 func (line CmdLine) String() string {
@@ -156,7 +162,7 @@ func (line CmdLine) ExecRun() error {
 			prog + ":",
 			viper.GetString("tag") + ":",
 			"dry-run:",
-			command,
+			line[pos],
 			line[pos + 1:],
 		)
 	} else if viper.GetBool("verbose") {
@@ -165,7 +171,7 @@ func (line CmdLine) ExecRun() error {
 			os.Stderr,
 			prog + ":",
 			viper.GetString("tag") + ":",
-			command,
+			line[pos],
 			line[pos + 1:],
 		)
 	}
@@ -283,7 +289,13 @@ type Script []CmdLine
 
 func (script *Script) Append(lines ...CmdLine) {
 	slice := *script
-	slice = append(slice, lines...)
+	// slice = append(slice, lines...)
+	for _, line := range lines {
+		line.Filter(Empty)
+		if len(line) > 0 {
+			slice = append(slice, line)
+		}
+	}
 	*script = slice
 }
 

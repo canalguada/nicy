@@ -561,7 +561,7 @@ def get_commands:
   else . end
   | if .use_scope then
     add_command([
-      "[ $(id -u) -ne 0 ] && user_or_system=--user || user_or_system="
+      "[ $(id -u) -ne 0 ] && user_or_system=--user || user_or_system=--system"
     ])
   else . end
   | process_env

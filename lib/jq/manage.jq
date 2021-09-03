@@ -130,7 +130,8 @@ def prepare_stream:
 # Managing process entry
 # ======================
 
-def user_or_not: if .cgroup | test("user.slice"; "") then "--user" else "" end ;
+def user_or_not:
+  if .cgroup | test("user.slice"; "") then "--user" else "--system" end ;
 
 def scope_unit: "\(.request.name)-\(.pid).scope" ;
 

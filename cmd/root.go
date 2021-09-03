@@ -19,6 +19,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"io"
+	"bytes"
 	"strings"
 	"strconv"
 	"text/tabwriter"
@@ -153,7 +155,7 @@ func printErrf(format string, a ...interface{}) (n int, err error){
 
 func createDirectoryIfNotExist(name string, perm os.FileMode) error {
 	if _, err := os.Stat(name); os.IsNotExist(err) {
-		return os.Mkdir(name, perm)
+		return os.MkdirAll(name, perm)
 	}
 	return nil
 }
@@ -166,6 +168,23 @@ func expandPath(path string) string {
 	return os.ExpandEnv(s)
 }
 
+func mergeConfigFile(path string) error {
+	if exists(path) {
+		configBytes, err := readFile(path)
+		if err != nil {
+			return err
+		}
+		// Find and read the config file
+		if err = viper.MergeConfig(bytes.NewBuffer(configBytes)); err != nil {
+			return wrapError(err)
+		}
+	} else {
+		return fmt.Errorf("%w: %v", ErrNotFound, path)
+	}
+	viper.SetConfigFile(path)
+	return nil
+}
+
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
 	var (
@@ -176,8 +195,6 @@ func initConfig() {
 	// Common configuration, per order of precedence in :
 	// - /usr/local/etc/%prog%
 	// - /etc/%prog%
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
 	// Get UID
 	uid := os.Getuid()
 	viper.SetDefault("UID", uid)
@@ -190,8 +207,6 @@ func initConfig() {
 		// Then XDG_CONFIG_HOME
 		path, _ = os.UserConfigDir() // No error, HOME is defined
 		viper.SetDefault("XDG_CONFIG_HOME", path)
-		// Finally
-		// viper.AddConfigPath(filepath.Join(configHome, prog))
 	}
 	if uid != 0 {
 		// Set XDG_CACHE_HOME and cachedir
@@ -201,6 +216,10 @@ func initConfig() {
 	} else {
 		// Set cachedir
 		viper.SetDefault("cachedir", filepath.Join("/var/cache", prog))
+	}
+	// Set cgroups, types, rules and database paths
+	for _, name := range []string{"cgroups", "types", "rules", "database"} {
+		viper.SetDefault(name, filepath.Join(viper.GetString("cachedir"), name))
 	}
 	// Set XDG_RUNTIME_DIR and runtimedir
 	path, ok := os.LookupEnv("XDG_RUNTIME_DIR")
@@ -228,39 +247,43 @@ func initConfig() {
 		path = filepath.Join("/usr/local/bin", prog)
 	}
 	viper.SetDefault("scripts", path)
-	// Config file
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		for i := len(configPaths) - 1; i >= 0; i-- {
-			viper.AddConfigPath(configPaths[i])
+	// Main default values
+	viper.SetDefault("confdirs", configPaths)
+	viper.SetDefault("libdir", filepath.Join("/usr/lib", prog))
+	viper.SetDefault("shell", "/bin/sh")
+	// Config files
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	// First merge existing default config files
+	for i := len(configPaths) - 1; i >= 0; i-- {
+		path = filepath.Join(configPaths[i], "config.yaml")
+		if err = mergeConfigFile(path); err != nil {
+			if viper.GetBool("debug") {
+				printErrln(err)
+			}
 		}
 	}
-	// Set cgroups, types, rules and database paths
-	for _, name := range []string{"cgroups", "types", "rules", "database"} {
-		viper.SetDefault(name, filepath.Join(viper.GetString("cachedir"), name))
+	// Then merge config file that user set with the flag
+	if cfgFile != "" {
+		if err = mergeConfigFile(cfgFile); err != nil {
+			if viper.GetBool("debug") {
+				printErrln(err)
+			}
+		}
 	}
 	// Allow use of environment variables
 	viper.SetEnvPrefix(prog)
 	viper.AutomaticEnv() // read in environment variables that match
-	// Default values
-	viper.SetDefault("confdirs", configPaths)
-	viper.SetDefault("libdir", filepath.Join("/usr/lib", prog))
-	viper.SetDefault("shell", "/bin/sh")
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil && viper.GetBool("debug") {
-		printErrln("Using config file:", viper.ConfigFileUsed())
-	}
-	// Debug
-	if viper.GetBool("debug") {
-		viper.WriteConfigAs(filepath.Join(viper.GetString("runtimedir"), "viper.yaml"))
-	}
 	// Provide SUDO environment variable to jq scripts.
 	os.Setenv("SUDO", viper.GetString("sudo"))
-	// Display the capabilities of the running process
+	// Debug
 	if viper.GetBool("debug") {
-		printErrln("Current process has these caps:", cap.GetProc())
+		// Display the capabilities of the running process
+		printErrln("caps:", cap.GetProc())
+		if viper.ConfigFileUsed() != "" {
+			printErrln("config file:", viper.ConfigFileUsed())
+		}
+		viper.WriteConfigAs(filepath.Join(viper.GetString("runtimedir"), "viper.yaml"))
 	}
 }
 
@@ -306,19 +329,21 @@ func setAmbientSysNice(enable bool) (err error) {
 	// }
 }
 
-func debugOutput(cmd *cobra.Command) *tabwriter.Writer {
-	// Initialize tabwriter
-	// output, minwidth, tabwidth, padding, padchar, flags
-	w := tabwriter.NewWriter(cmd.ErrOrStderr(), 8, 8, 0, '\t', 0)
-	// Debug output
+func debugOutput(cmd *cobra.Command) {
 	if viper.GetBool("debug") {
-		w.Write([]byte("Viper key:\tValue\n"))
+		tw := getTabWriter(cmd.ErrOrStderr())
+		fmt.Fprintf(cmd.ErrOrStderr(), "command:\n%#v\n", cmd.Name())
+		tw.Write([]byte("key:\tvalue\n"))
 		for _, k := range viper.AllKeys() {
-			w.Write([]byte(fmt.Sprintf("%s:\t%#v\n", k, viper.Get(k))))
+			tw.Write([]byte(fmt.Sprintf("%s:\t%#v\n", k, viper.Get(k))))
 		}
-		w.Flush()
+		tw.Flush()
 	}
-	return w
+}
+
+func getTabWriter(output io.Writer) *tabwriter.Writer {
+	// output, minwidth, tabwidth, padding, padchar, flags
+	return tabwriter.NewWriter(output, 8, 8, 0, '\t', 0)
 }
 
 // checkConsistency returns an error if two or more mutually exclusive flags
