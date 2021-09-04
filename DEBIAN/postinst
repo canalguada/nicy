@@ -1,0 +1,3 @@
+#!/bin/sh
+/usr/sbin/setcap "cap_setpcap,cap_sys_nice=p" /usr/bin/nicy
+

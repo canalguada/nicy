@@ -78,8 +78,6 @@ for item in "version" "revision" "release_dir"; do
 done
 set -o nounset
 
-SUDO=$([ $UID -ne 0 ] && echo "sudo")
-
 # Debian-based distributions
 if true; then
   # More requred commands
@@ -92,10 +90,10 @@ if true; then
   )
   debver="${debver}-${revision}"
   arch=$(dpkg --print-architecture)
-  debname="${package}-${debver}_${arch}"
+  debname="${package}_${debver}_${arch}"
   # Prepare release directory
   rm -f "${release_dir}/${debname}.deb"
-  $SUDO rm -rf "${release_dir}/${debname}"
+  rm -rf "${release_dir}/${debname}"
   install -d "${release_dir}/${debname}/DEBIAN"
   # Copy release
   make \
@@ -107,8 +105,9 @@ if true; then
     -e 's/\(Version:\) VERSION/\1 '${debver}'/g'  \
     -e 's/\(Architecture:\) ARCH/\1 '${arch}'/g'  \
     ./DEBIAN/control >"${release_dir}/${debname}/DEBIAN/control"
+	cp ./DEBIAN/postinst "${release_dir}/${debname}/DEBIAN/"
+	chmod -f 0775 "${release_dir}/${debname}/DEBIAN/postinst"
   # Finally, build debian package
   cd ${release_dir}
-  $SUDO chown -R root:root "${debname}" &&
-    dpkg-deb --build "${debname}"
+	dpkg-deb --build --root-owner-group "${debname}"
 fi
