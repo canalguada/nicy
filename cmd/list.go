@@ -25,7 +25,7 @@ import (
 
 // listCmd represents the list command
 var listCmd = &cobra.Command{
-	Use:   "list [--from=DIRECTORY] CATEGORY",
+	Use:   "list [-n] [-f DIRECTORY] CATEGORY",
 	Short: "List json objects",
 	Long: `List the objects from cgroups, types or rules CATEGORY, removing all duplicates
 
@@ -43,7 +43,7 @@ The CATEGORY argument can be 'rules', 'types' or 'cgroups', matching the extensi
 		debugOutput(cmd)
 		// Real job goes here
 		output, err := listObjects(args[0])
-		checkErr(err)
+		fatal(wrap(err))
 
 		tw := getTabWriter(cmd.OutOrStdout())
 		// To update writer

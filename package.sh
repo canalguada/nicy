@@ -79,7 +79,8 @@ done
 set -o nounset
 
 # Debian-based distributions
-if true; then
+if command -v lsb_release &>/dev/null &&
+	[[ "$(lsb_release -is | tr "[:upper:]" "[:lower:]")" =~ debian|ubuntu ]]; then
   # More requred commands
   LANG=C command -V dpkg
   LANG=C command -V dpkg-deb

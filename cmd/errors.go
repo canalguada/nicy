@@ -32,74 +32,81 @@ const (
 	EPARSE = 2
 	ENOTCONF = 3
 	ENOTDIR = 4
-	EACCES = 5
+	EACCESS = 5
 	EINVAL = 6
 	EALREADY = 16
-	EJQUSAGE = 66
-	EJQCOMPILE = 67
+	EUSAGE = 66
+	ECOMPILE = 67
 	EPERM = 126
 	ENOTFOUND = 127
 )
 
-var ErrFailure = errors.New("fail")
-var ErrParse = errors.New("cannot parse options")
-var ErrNotConfDir = errors.New("unknown directory")
-var ErrNotDir = errors.New("not a directory")
-var ErrNotWritableDir = errors.New("not writable directory")
-var ErrInvalid = errors.New("invalid argument")
-var ErrAlready = errors.New("already running")
-var ErrPermission = errors.New("permission denied")
-var ErrNotFound = errors.New("not found")
 
-// checkErr prints the error message with the prefix 'Error:' and exits with
-// proper error code. If the error is nil, it does nothing.
-func checkErr(e error) {
+type customError struct {
+	msg string
+	Code int
+}
+
+func (e customError) Error() string {
+	return e.msg
+}
+
+var (
+	ErrFailure = customError{"fail", FAILURE}
+	ErrParse = customError{"cannot parse options", EPARSE}
+	ErrNotConfDir = customError{"unknown directory", ENOTCONF}
+	ErrNotDir = customError{"not a directory", ENOTDIR}
+	ErrNotWritableDir = customError{"not writable directory", EACCESS}
+	ErrInvalid = customError{"invalid argument", EINVAL}
+	ErrAlready = customError{"already running", EALREADY}
+	ErrPermission = customError{"permission denied", EPERM}
+	ErrNotFound = customError{"not found", ENOTFOUND}
+	ErrUsage = customError{"gojq usage", EUSAGE}
+	ErrCompile = customError{"gojq compile", ECOMPILE}
+)
+
+// fatal prints the error message and exits with proper error code.
+// If the error is nil, it does nothing.
+func fatal(e error) {
 	if e != nil {
-		printErrln(e)
-		switch {
-		case errors.Is(e, ErrFailure):
-			os.Exit(FAILURE)
-		case errors.Is(e, ErrParse):
-			os.Exit(EPARSE)
-		case errors.Is(e, ErrNotConfDir):
-			os.Exit(ENOTCONF)
-		case errors.Is(e, ErrNotDir):
-			os.Exit(ENOTDIR)
-		case errors.Is(e, ErrNotWritableDir):
-			os.Exit(EACCES)
-		case errors.Is(e, ErrInvalid):
-			os.Exit(EINVAL)
-		case errors.Is(e, ErrAlready):
-			os.Exit(EALREADY)
-		case errors.Is(e, jq.ErrUsage):
-			os.Exit(EJQUSAGE)
-		case errors.Is(e, jq.ErrCompile):
-			os.Exit(EJQCOMPILE)
-		case errors.Is(e, ErrPermission):
-			os.Exit(EPERM)
-		case errors.Is(e, ErrNotFound):
-			os.Exit(ENOTFOUND)
-		default:
+		warn(e)
+		var err *customError
+		if errors.As(e, &err) {
+			os.Exit(err.Code)
+		} else {
 			os.Exit(FAILURE)
 		}
 	}
 }
 
-func wrapError(e error) error {
+func nonfatal(e error) bool {
+	if e != nil {
+		warn(e)
+		return false
+	}
+	return true
+}
+
+func wrap(e error) error {
 	if e == nil {
 		return nil
 	}
+	// Yet wrapped
+	var err *customError
+	if errors.As(e, &err) {
+		return e
+	}
 	switch {
+	case errors.Is(e, jq.ErrUsage):
+		return fmt.Errorf("%w", ErrUsage)
+	case errors.Is(e, jq.ErrCompile):
+		return fmt.Errorf("%w", ErrCompile)
 	case errors.Is(e, os.ErrInvalid):
 		return fmt.Errorf("%w: %v", ErrInvalid, e)
 	case errors.Is(e, os.ErrPermission):
 		return fmt.Errorf("%w: %v", ErrPermission, e)
 	case errors.Is(e, exec.ErrNotFound):
 		return fmt.Errorf("%w: %v", ErrNotFound, e)
-	case errors.Is(e, jq.ErrUsage): // Yet wrapped
-		return e
-	case errors.Is(e, jq.ErrCompile): // Yet wrapped
-		return e
 	default:
 		switch e := e.(type) {
 		case *os.PathError:
@@ -116,12 +123,11 @@ func wrapError(e error) error {
 		case *exec.ExitError:
 			return fmt.Errorf("%w: %v", ErrFailure, e)
 		case *exec.Error:
-			return wrapError(e.Unwrap())
+			return wrap(e.Unwrap())
 		default:
 			return fmt.Errorf("%w: %v", ErrFailure, e)
 		}
 	}
 }
-
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

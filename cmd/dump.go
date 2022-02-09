@@ -26,7 +26,7 @@ import (
 
 // dumpCmd represents the dump command
 var dumpCmd = &cobra.Command{
-	Use:   "dump [--user|--global|--system|--all] [--raw|--json|--nicy]",
+	Use:   "dump [-u|-g|-s|-a] [-r|-j|-v]",
 	Short: "Dump running processes statistics",
 	Long: `Dump statistics for the running processes`,
 	Args: cobra.MaximumNArgs(0),
@@ -34,7 +34,7 @@ var dumpCmd = &cobra.Command{
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		var slices = map[int][]string{
 			0: []string{"user", "global", "system", "all"},
-			1: []string{"json", "raw", "nicy"},
+			1: []string{"json", "raw", "values"},
 		}
 		fs := cmd.LocalNonPersistentFlags()
 		for key := range slices {
@@ -54,24 +54,24 @@ var dumpCmd = &cobra.Command{
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		var filterFunc process.Filter
-		var formatterFunc process.Formatter
+		var filter process.Filter
+		var formatter process.Formatter
 		var message string
 		switch {
 		case viper.GetBool("user"):
-			filterFunc = process.GetFilter("user")
+			filter = process.GetFilter("user")
 			message = "calling user processes"
 		case viper.GetBool("global"):
-			filterFunc = process.GetFilter("global")
+			filter = process.GetFilter("global")
 			message = "processes inside any user slice"
 		case viper.GetBool("system"):
-			filterFunc = process.GetFilter("system")
+			filter = process.GetFilter("system")
 			message = "processes inside system slice"
 		case viper.GetBool("all"):
-			filterFunc = process.GetFilter("all")
+			filter = process.GetFilter("all")
 			message = "all processes"
 		default:
-			filterFunc = process.GetFilter("user")
+			filter = process.GetFilter("user")
 			message = "calling user processes"
 		}
 		if viper.GetBool("verbose") {
@@ -79,16 +79,16 @@ var dumpCmd = &cobra.Command{
 		}
 		switch {
 		case viper.GetBool("json"):
-			formatterFunc = process.GetFormatter("json")
+			formatter = process.GetFormatter("json")
 		case viper.GetBool("raw"):
-			formatterFunc = process.GetFormatter("raw")
+			formatter = process.GetFormatter("raw")
 		case viper.GetBool("values"):
-			formatterFunc = process.GetFormatter("values")
+			formatter = process.GetFormatter("values")
 		default:
-			formatterFunc = process.GetFormatter("string")
+			formatter = process.GetFormatter("string")
 		}
-		for _, p := range process.AllProcs(filterFunc) {
-			cmd.Println(formatterFunc(&p))
+		for _, p := range process.FilteredProcs(filter) {
+			cmd.Println(formatter(&p))
 		}
 	},
 }

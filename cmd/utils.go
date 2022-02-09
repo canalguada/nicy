@@ -31,27 +31,29 @@ import (
 	"time"
 	"runtime"
 	"sync"
+	"golang.org/x/sys/unix"
 	"github.com/canalguada/nicy/process"
-	"github.com/canalguada/nicy/jq"
+	// "github.com/canalguada/nicy/jq"
 	"github.com/spf13/viper"
 )
+
 
 // Build command
 
 // readDirNames reads the directory named by dirname and returns a sorted list
 // of directory entries.
-func readDirNames(dirname string) ([]string, error) {
+func readDirNames(dirname string) (names []string, err error) {
 	f, err := os.Open(dirname)
 	if err != nil {
-		return nil, wrapError(err)
+		return
 	}
-	names, err := f.Readdirnames(-1)
+	names, err = f.Readdirnames(-1)
 	f.Close()
 	if err != nil {
-		return nil, wrapError(err)
+		return
 	}
 	sort.Strings(names)
-	return names, nil
+	return
 }
 
 // findFiles walks the file tree rooted at root and returns the sorted list of
@@ -65,8 +67,8 @@ func findFiles(root, pattern string, mindepth, maxdepth int) (result []string, e
 		root,
 		func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				printErrf("failure accessing %q: %v\n", path, err)
-				return wrapError(err)
+				// Failure accessing path
+				return err
 			}
 			if path == root {
 				depth = 0
@@ -79,7 +81,8 @@ func findFiles(root, pattern string, mindepth, maxdepth int) (result []string, e
 			}
 			matched, err := filepath.Match(pattern, info.Name())
 			if err != nil {
-				return fmt.Errorf("%w: bad pattern %+v", ErrInvalid, pattern)
+				// Invalid pattern
+				return err
 			}
 			if matched {
 				result = append(result, path)
@@ -91,26 +94,14 @@ func findFiles(root, pattern string, mindepth, maxdepth int) (result []string, e
 	return
 }
 
-func exists(path string) bool {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return false
-	}
-	return true
-}
-
 func timestamp() string {
 	return fmt.Sprintf("%v", time.Now().Unix())
-}
-
-func readFile(path string) ([]byte, error) {
-	out, err := ioutil.ReadFile(path)
-	return out, wrapError(err)
 }
 
 func getTempFile(dest, pattern string) (*os.File, error) {
 	file, err := ioutil.TempFile(dest, pattern)
 	if err != nil {
-		return nil, wrapError(err)
+		return nil, err
 	}
 	return file, nil
 }
@@ -118,50 +109,42 @@ func getTempFile(dest, pattern string) (*os.File, error) {
 func writeTo(path string, buf []byte) (n int, err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		err = wrapError(err)
 		return
 	}
 	defer f.Close()
 	n, err = f.Write(buf)
-	if err != nil {
-		err = wrapError(err)
-	}
 	return
 }
 
 func appendTo(path string, buf []byte) (n int, err error) {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		err = wrapError(err)
 		return
 	}
 	defer f.Close()
 	n, err = f.Write(buf)
-	if err != nil {
-		err = wrapError(err)
-	}
 	return
 }
 
-type UnmarshalFunc func(s string) (map[string]interface{}, error)
+type UnmarshalFunc func(s string) (CStringMap, error)
 
-func dumpContent(path string, fn UnmarshalFunc) (content []interface{}, err error) {
+func dumpContent(path string, fn UnmarshalFunc) (content CSlice, err error) {
+	var bufline []byte
+	var item CStringMap
 	re := regexp.MustCompile(`^[ ]*#`)
 	file, err := os.Open(path)
 	if err != nil {
-		err = wrapError(err)
 		return
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	// optionally, resize scanner's capacity for content over 64K
 	for scanner.Scan() {
-		bufline := scanner.Bytes()
+		bufline = scanner.Bytes()
 		if len(bufline) != 0 && !(re.Match(bufline)) {
-			item, e := fn(scanner.Text())
-			if e != nil {
-				err = wrapError(e)
-			return
+			item, err = fn(scanner.Text())
+			if err != nil {
+				return
 			}
 			content = append(content, item)
 		}
@@ -172,7 +155,7 @@ func dumpContent(path string, fn UnmarshalFunc) (content []interface{}, err erro
 	return
 }
 
-func dumpObjects(category, root string) (objects []interface{}, err error) {
+func dumpObjects(category, root string) (objects CSlice, err error) {
 	var mindepth, maxdepth int
 	pattern := fmt.Sprintf("*.%s", category)
 	if category == "rules" {
@@ -186,13 +169,13 @@ func dumpObjects(category, root string) (objects []interface{}, err error) {
 	sort.Sort(sort.Reverse(sort.StringSlice(files)))
 	for _, file := range files {
 		// Each line contains a json object to unmarshal into
-		// map[string]interface{}
+		// CStringMap
 		lines, e := dumpContent(
 			file,
-			func(s string) (map[string]interface{}, error) {
-				var result map[string]interface{}
+			func(s string) (CStringMap, error) {
+				var result CStringMap
 				if err := json.Unmarshal([]byte(s), &result); err != nil {
-					return nil, wrapError(err)
+					return nil, err
 				}
 				result["origin"] = root
 				return result, nil
@@ -200,75 +183,42 @@ func dumpObjects(category, root string) (objects []interface{}, err error) {
 		)
 		objects = append(objects, lines...)
 		if e != nil {
-			err = e // Yet wrapped error
-			return
+			err = e
+			break
 		}
-	}
-	return objects, nil
-}
-
-func readCache() (cache map[string]interface{}, err error) {
-	filename := viper.GetString("database")
-	data, err := readFile(filename)
-	if err != nil {
-		return
-	}
-	if err = json.Unmarshal(data, &cache); err != nil {
-		err = wrapError(err)
-	}
-	return
-}
-
-func readCategoryCache(category string) (cache []interface{}, err error) {
-	filename := viper.GetString(category)
-	data, err := readFile(filename)
-	if err != nil {
-		return
-	}
-	if err = json.Unmarshal(data, &cache); err != nil {
-		err = wrapError(err)
 	}
 	return
 }
 
 // List command
 
-func listObjects(category string) (output []interface{}, err error) {
-	var input []interface{}
+func listObjects(category string) (output CSlice, err error) {
+	var input CSlice
 	// Prepare input
 	if viper.IsSet("from") {
-		input = []interface{}{viper.Get("from")}
+		input = CSlice{viper.Get("from")}
 	} else {
 		slice := viper.GetStringSlice("confdirs")
-		input = make([]interface{}, len(slice))
+		input = make(CSlice, len(slice))
 		for i, path := range slice {
 			input[i] = expandPath(path)
 		}
 	}
 	// Prepare variables
-	cachedb, err := readCache()
-	checkErr(err)
-
-	req := jq.NewRequest(
+	cacheContent, err = ReadCache()
+	fatal(wrap(err))
+	// Prepare request
+	req := NewCacheRequest(
 		`include "list"; list`,
-		[]string{"$cachedb", "$kind"},
-		cachedb,
+		[]string{"$kind"},
 		strings.TrimRight(category, "s"),
 	)
-	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
+	// Get result
 	output, err = req.Result(input)
 	return
 }
 
 // Run and show commands
-
-func lookPath(command string) (result string, err error) {
-	result, err = exec.LookPath(command)
-	if err != nil {
-		err = wrapError(err)
-	}
-	return
-}
 
 // func findAllPaths(command string) ([]string, error) {
 //   return CmdLine{"sh", "-c", fmt.Sprintf("which -a %s", command)}.Output()
@@ -291,12 +241,10 @@ func findExecutable(file string) error {
 // The result may be an absolute path or a path relative to the current directory.
 func lookAll(file string) (result []string, err error) {
 	if strings.Contains(file, string(filepath.Separator)) {
-		e := findExecutable(file)
-		if e == nil {
+		err = findExecutable(file)
+		if err == nil {
 			result = append(result, file)
-			return
 		}
-		err = wrapError(e)
 		return
 	}
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
@@ -339,101 +287,203 @@ func findValidPath(command string) (valid string, err error) {
 	return
 }
 
-func yieldScriptFrom(shell string, args []string) (Script, error) {
-	// Prepare variables
-	cachedb, err := readCache()
-	if err != nil {
-		return nil, err
-	}
-	req := jq.NewRequest(
-		`include "run"; run`,
-		[]string{"$cachedb"},
-		cachedb)
-	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
-	// Prepare input
+// Show
+
+func prepareRunJob(shell string, args []string, output chan<- ProcJob, wgmain *sync.WaitGroup) {
+	defer wgmain.Done()
+	// Check command path
 	command, err := findValidPath(args[0])
 	if err != nil {
-		return nil, err
+		return
 	}
-	input := NewRunInput(command)
-	input.Shell = filepath.Base(shell)
-	// Get output
-	output, err := req.Result(input.Map())
-	switch {
-	case err != nil:
-		return nil, err
-	case output[0] != "commands":
-		return nil, fmt.Errorf("%w: %v", ErrInvalid, output[1:])
-	}
-	output = output[1:]
-	script, err := DecodeScript(output)
-	checkErr(err)
-	return NewShellScript(shell, script...), nil
+	// get cache content, once for both go routines
+	cacheContent, err = ReadCache()
+	fatal(wrap(err))
+	// prepare channels
+	requests := make(chan CStringMap, 2)
+	inputs := make(chan CStringMap, 2)
+	entries := make(chan CStringMap, 2)
+	// spin up workers and use a sync.WaitGroup to indicate completion
+	var wg sync.WaitGroup
+	var script string
+	// get commands
+	wg.Add(1)
+	// go prepareLaunch(entries, output, &wg)
+	go func() {
+		defer wg.Done()
+		for obj := range entries {
+			job := NewProcJob(&obj)
+			nonfatal(job.PrepareLaunch())
+			output <- *job
+		}
+		close(output)
+	}()
+	// get entries
+	wg.Add(1)
+	script = `include "common"; get_entries`
+	go NewCacheRequest(script, []string{}).GetMapFromMap(inputs, entries, &wg)
+	// format input
+	wg.Add(1)
+	script = `{ "request": ., "entries": { "cred": [] }, "commands": [] }`
+	go NewRequest(script, []string{}).GetMapFromMap(requests, inputs, &wg)
+	// send input
+	input := NewRunInput(shell, command)
+	requests <- input.GetStringMap()
+	close(requests)
+	// wait on the workers to finish
+	wg.Wait()
+	return
 }
 
-// Manage command
+func showCommand(shell string, args []string) (result []string, err error) {
+	// prepare channels
+	jobs := make(chan ProcJob, 2)
+	// spin up workers and use a sync.WaitGroup to indicate completion
+	var wg sync.WaitGroup
+	// get result
+	wg.Add(1)
+	result = append(result, `#!`+ shell)
+	go func () {
+		defer wg.Done()
+		for job := range jobs {
+			lines, err := job.Show()
+			fatal(err)
+			result = append(result, lines...)
+		}
+	}()
+	// get commands
+	wg.Add(1)
+	go prepareRunJob(shell, args, jobs, &wg)
+	// wait on the workers to finish
+	wg.Wait()
+	return
+}
 
-func streamProcAdjust(filterFunc process.Filter) (objects []interface{}, err error) {
-	// Prepare variables
-	cachedb, err := readCache()
-	checkErr(err)
-	req := jq.NewRequest(
-		`include "manage"; manage_runtime`,
-		[]string{"$cachedb", "$nproc", "$max_nice", "$uid", "$shell"},
-		cachedb,
-		numCPU(),
-		int(rlimitNice().Max),
-		viper.GetInt("UID"),
-		"/bin/sh",
-	)
-	req.LibDirs = []string{filepath.Join(expandPath(viper.GetString("libdir")), "jq")}
-	// Prepare input
-	input := ManageInput{}
-	for _, p :=range process.AllProcs(filterFunc) {
-		input.Append(&p)
-	}
-	// Get result
-	objects, err = req.Result(input.Slice())
+// Run
+
+func prettyJson(v interface{}) (result string) {
+	// pretty print json
+	pretty, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		err = fmt.Errorf("%w: %v", ErrInvalid, err)
+		warn(err)
+	} else {
+		result = fmt.Sprintln(string(pretty))
 	}
 	return
 }
 
-func runProcAdjust(objects []interface{}, stdout, stderr io.Writer) {
-	// make our channel for communicating work
-	jobs := make(chan ManageJob, len(objects))
-	// spin up workers and use a sync.WaitGroup to indicate completion
-	var count = runtime.GOMAXPROCS(0)
-	var wg sync.WaitGroup
-	for i := 0; i < count; i++ {
-		wg.Add(1)
-		go func(jobs <-chan ManageJob, wg *sync.WaitGroup){
-			defer wg.Done()
-			// Do work on job here
-			for job := range jobs {
-				job.Run(stdout, stderr)
-			}
-		}(jobs, &wg)
+func doFork() (err error) {
+	// usage
+	// err = doFork()
+	// fatal(err)
+	// // now, we are child
+	// pid = os.Getpid()
+	ret, _, errNo := unix.RawSyscall(unix.SYS_FORK, 0, 0, 0)
+	if errNo != 0 {
+		err = fmt.Errorf("%w: fork failed err: %d", ErrFailure, errNo)
+		return
 	}
-	// start sending jobs
-	go func() {
-		defer close(jobs)
-		for _, json := range objects {
-			obj, ok := json.(map[string]interface{})
-			if !(ok) {
-				// Skip if not valid object
-				fmt.Fprintf(stderr, "not a valid object: %#v\n", json)
-				continue
+	switch ret {
+	case 0:
+		break
+	default:
+		// parent
+		os.Exit(0)
+	}
+	// now, we are child
+	sid, err := unix.Setsid()
+	if sid < 0 || err != nil {
+		err = fmt.Errorf("%w: setsid failed err: %v", ErrFailure, err)
+		return
+	}
+	return
+}
+
+func runCommand(tag string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	// prepare channels
+	jobs := make(chan ProcJob, 2)
+	// spin up workers and use a sync.WaitGroup to indicate completion
+	var wg sync.WaitGroup
+	// get result
+	wg.Add(1)
+	go func () {
+		defer wg.Done()
+		for job := range jobs {
+			if err := job.Run(tag, args[1:], stdin, stdout, stderr); err != nil {
+				fatal(err)
 			}
-			// TODO: Remove after debug
-			// fmt.Fprintf(stderr, "%#v\n", obj)
-			// Extract job per process group
-			jobs <- *NewManageJob(&obj)
 		}
 	}()
+	// get commands
+	wg.Add(1)
+	go prepareRunJob("/bin/sh", args, jobs, &wg)
 	// wait on the workers to finish
 	wg.Wait()
+	return nil
+}
+
+// Manage command
+
+func prepareAdjust(input <-chan CStringMap, output chan<- ProcGroupJob, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for obj := range input {
+		job := NewProcGroupJob(&obj)
+		nonfatal(job.PrepareAdjust())
+		output <- *job
+	}
+	close(output)
+}
+
+func manageCommand(tag string, filter process.Filter, stdout, stderr io.Writer) (err error) {
+	// get cache content, once for both go routines
+	cacheContent, err = ReadCache()
+	fatal(wrap(err))
+	// prepare channels
+	runjobs := make(chan ProcGroupJob, 8)
+	jobs := make(chan CStringMap, 8)
+	maps := make(chan CSlice, 8)
+	inputs := make(chan CSlice, 8)
+	// spin up workers and use a sync.WaitGroup to indicate completion
+	var wg sync.WaitGroup
+	count := runtime.GOMAXPROCS(0)
+	// running jobs
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(input <-chan ProcGroupJob, wg *sync.WaitGroup, tag string, stdout, stderr io.Writer) {
+			defer wg.Done()
+			for job := range input {
+				job.Run(tag, stdout, stderr)
+			}
+		}(runjobs, &wg, tag, stdout, stderr)
+	}
+	// prepare process group jobs
+	wg.Add(1)
+	go prepareAdjust(jobs, runjobs, &wg)
+	// filter process group jobs
+	wg.Add(1)
+	go NewCacheRequest(
+		`include "manage"; get_process_group_job`,
+		[]string{"$nproc", "$max_nice", "$uid", "$shell"},
+		numCPU(),
+		int(rlimitNice().Max),
+		viper.GetInt("UID"),
+		"/bin/sh",
+	).GetMapFromSlice(maps, jobs, &wg)
+	// preparing input
+	wg.Add(1)
+	go NewCacheRequest(
+		`include "common"; .[] | select(.comm | within(rule_names))`,
+		[]string{},
+	).GetSliceFromSlice(inputs, maps, &wg)
+	inputs <- NewManageInput(filter).GetSlice()
+	close(inputs)
+	// wait on the workers to finish
+	wg.Wait()
+	return err
+}
+
+func getManageInput(filter process.Filter) CSlice {
+	return NewManageInput(filter).GetSlice()
 }
 
 // TODO: Install command

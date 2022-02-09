@@ -23,21 +23,149 @@ import (
 	"io"
 	"path/filepath"
 	"strconv"
+	"bytes"
 	"strings"
 	"golang.org/x/sys/unix"
-	"github.com/google/shlex"
+	"github.com/kballard/go-shellquote"
 	"github.com/spf13/viper"
 )
 
+func ShellJoin(words ...string) string {
+	return shellquote.Join(words...)
+}
 
-type CmdLine []string
+func ShellSplit(input string) (words []string, err error) {
+	return shellquote.Split(input)
+}
 
-func DecodeCmdLine(input interface{}) (cmdline CmdLine, err error) {
+func ShellQuote(words []string) (result []string) {
+	for _, word := range words {
+		// Bail out early for "simple" strings
+		if word != "" && !strings.ContainsAny(word, "\\'\"`${[|&;<>()~*?! \t\n") {
+			result = append(result, word)
+		} else {
+			var buf bytes.Buffer
+			buf.WriteString("'")
+			for i := 0; i < len(word); i++ {
+				b := word[i]
+				if b == '\'' {
+					// Replace literal ' with a close ', a \', and a open '
+					buf.WriteString("'\\''")
+				} else {
+					buf.WriteByte(b)
+				}
+			}
+			buf.WriteString("'")
+			result = append(result, buf.String())
+		}
+	}
+	return
+}
+
+type Words []string
+
+func (self Words) Copy() Words {
+	buf := make(Words, len(self))
+	_ = copy(buf, self)
+	return buf
+}
+
+func (self *Words) Append(args ...string) {
+	*self = append(*self, args...)
+}
+
+func (self *Words) Extend(other Words) {
+	*self = append(*self, other...)
+}
+
+func (self Words) Index(pos int) (result string, err error) {
+	if pos < 0 || pos > (len(self) - 1) {
+		err = fmt.Errorf("%w: not a valid index: %d", ErrInvalid, pos)
+	} else {
+		result = self[pos]
+	}
+	return
+}
+
+func (self Words) IsEmpty() bool {
+	return len(self) == 0
+}
+
+func (self Words) Line() string {
+	return strings.TrimSpace(strings.Join(self, ` `))
+}
+
+func (self Words) String() string {
+	return `[`+ self.Line() + `]`
+}
+
+func (self Words) WriteTo(dest io.Writer) (n int, err error) {
+	n, err = fmt.Fprintf(dest, self.Line() + "\n")
+	return
+}
+
+func (self Words) WriteVerboseTo(dest io.Writer) (n int, err error) {
+	n, err = fmt.Fprintf(dest, "echo %s: %s: %s\n", prog, "run", self.Line())
+	return
+}
+
+type WordFilter func(word string) bool
+
+var Empty WordFilter = func(word string) bool {
+	return len(word) == 0
+}
+
+func (self *Words) Filter(filter WordFilter) {
+	var buf Words
+	for _, word := range *self {
+		if !(filter(word)) {
+			buf = append(buf, word)
+		}
+	}
+	*self = buf
+}
+
+type CmdLine struct {
+	words Words
+	skipWhenRun bool
+}
+
+func NewCmdLine(s ...string) CmdLine {
+	return CmdLine{words: Words(s)}
+}
+
+func (line CmdLine) Copy() CmdLine {
+	return CmdLine{words: line.words.Copy(), skipWhenRun: line.skipWhenRun}
+}
+
+func (line *CmdLine) Append(words ...string) {
+	line.words.Append(words...)
+}
+
+func (line *CmdLine) Extend(other CmdLine) {
+	line.words.Extend(other.words)
+}
+
+func (line CmdLine) Index(pos int) (result string) {
+	word, err := line.words.Index(pos)
+	if err != nil {
+		fatal(err)
+	} else {
+		result = word
+	}
+	return
+}
+
+func (line CmdLine) IsEmpty() bool {
+	return line.words.IsEmpty()
+}
+
+func DecodeCmdLine(input interface{}) (result CmdLine, err error) {
 	if line, ok := input.([]interface{}); ok {
 		for _, s := range line {
-			if token, ok := s.(string); ok {
-				if len(token) > 0 {
-					cmdline = append(cmdline, token)
+			if word, ok := s.(string); ok {
+				if len(word) > 0 {
+					result.Append(word)
 				}
 			} else {
 				err = fmt.Errorf("%w: not a string: %v", ErrInvalid, s)
@@ -50,253 +178,247 @@ func DecodeCmdLine(input interface{}) (cmdline CmdLine, err error) {
 	return
 }
 
-func NewCmdLine(line string) CmdLine {
-	// shlex.Split removes comments and shebang lines
-	args, err := shlex.Split(line)
-	checkErr(err)
-	return CmdLine(args)
+func CmdLineFromString(line string) CmdLine {
+	words, err := ShellSplit(line)
+	fatal(wrap(err))
+	return NewCmdLine(words...)
 }
 
-func (line CmdLine) RequireSysNice() bool {
-	var pos int
-	if line[0] == "$SUDO" {
-		pos = 1
-	}
-	// Always set flag for the following system utilies
-	for _, c := range []string{"renice", "chrt", "ionice"} {
-			if line[pos] == c {
-				return true
-			}
-	}
-	return false
-}
-
-func (line CmdLine) Runtime(pid, uid int) CmdLine {
-	runtime := line[:]
-	for i, arg := range runtime {
-		switch {
-		case arg == "${user_or_system}":
-			if uid != 0 {
-				runtime[i] = "--user"
-			} else {
-				runtime[i] = "--system"
-			}
-		case strings.Contains(arg, "$$"):
-			runtime[i] = strings.Replace(arg, "$$", strconv.Itoa(pid), 1)
-		}
-	}
-	return CmdLine(runtime)
-}
-
-func (line *CmdLine) Append(args ...string) {
-	line.Extend(CmdLine(args))
-}
-
-func (line *CmdLine) Extend(other CmdLine) {
-	other.Filter(Empty)
-	buf := make([]string, len(*line), len(*line) + len(other))
-	_ = copy(buf, *line)
-	buf = append(buf, other...)
-	*line = buf
+func (line CmdLine) ShellLine() string {
+	// words are yet shell-quoted when required
+	return line.words.Line()
 }
 
 func (line CmdLine) String() string {
-	return strings.TrimSpace(strings.Join(line, " "))
+	return line.words.String()
 }
 
-func (line CmdLine) Output() (output []string, err error) {
-	data, err := exec.Command(line[0], line[1:]...).Output()
-	if err != nil {
-		err = wrapError(err)
-	} else {
-		output = strings.Split(string(data), "\n")
+func (line CmdLine) WriteTo(dest io.Writer) (int, error) {
+	return line.words.WriteTo(dest)
+}
+
+func (line CmdLine) WriteVerboseTo(dest io.Writer) (int, error) {
+	return line.words.WriteVerboseTo(dest)
+}
+
+func (line CmdLine) RequireSysCapability(uid int) (comm string, flag bool) {
+	var pos int
+	if line.Index(0) == "$SUDO" {
+		pos = 1
+	}
+	// Set flag for given system utilies
+	comm = filepath.Base(line.Index(pos))
+	switch comm {
+	case "renice", "chrt", "ionice", "choom":
+		flag = true
 	}
 	return
 }
 
-func (line CmdLine) unprivilegedRun(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
-	args := CmdLine(line[:])
-	if args[len(args) - 1] == ">/dev/null" {
-		stdout = nil
-		args = args[:len(args) - 1]
+func (line CmdLine) Runtime(pid, uid int) CmdLine {
+	words := line.words.Copy()
+	for i, word := range words {
+		switch {
+		case word == "${user_or_system}":
+			if uid != 0 {
+				words[i] = "--user"
+			} else {
+				words[i] = "--system"
+			}
+		case strings.Contains(word, "$$"):
+			words[i] = strings.Replace(word, "$$", strconv.Itoa(pid), 1)
+		}
 	}
+	return NewCmdLine(words...)
+}
+
+func (line CmdLine) Output() (output []string, err error) {
+	data, err := exec.Command(line.words[0], line.words[1:]...).Output()
+	if err != nil {
+		return
+	}
+	output = strings.Split(string(data), "\n")
+	return
+}
+
+type Streams struct {
+	Stdin io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+func (std *Streams) Scan(line CmdLine) (result Words) {
+	for _, arg := range line.words {
+		switch {
+		case strings.HasPrefix(arg, ">") || strings.HasPrefix(arg, "1>"):
+			name := strings.TrimPrefix(arg, "1>")
+			name = strings.TrimPrefix(arg, ">")
+			name = strings.TrimSpace(name)
+			if name == "/dev/null" {
+				std.Stdout = nil
+			} else if name == "&2" {
+				std.Stdout = std.Stderr
+			} else {
+				warn(fmt.Errorf("%w: invalid redirection: %v", ErrInvalid, arg))
+				continue
+			}
+		case strings.HasPrefix(arg, "2>"):
+			name := strings.TrimPrefix(arg, "2>")
+			name = strings.TrimSpace(name)
+			if name == "/dev/null" {
+				std.Stderr = nil
+			} else if name == "&2" {
+				std.Stderr = std.Stdout
+			} else {
+				warn(fmt.Errorf("%w: invalid redirection: %v", ErrInvalid, arg))
+				continue
+			}
+		default:
+			result.Append(arg)
+		}
+	}
+	return
+}
+
+func (line CmdLine) getCmd(tag string, std *Streams) (cmd *exec.Cmd, err error) {
+	words := std.Scan(line)
+	command, err := exec.LookPath(words[0])
+	if err != nil {
+		return
+	}
+	cmd = exec.Command(command, words[1:]...)
+	// Connect input/output
+	cmd.Stdin = std.Stdin
+	cmd.Stdout = std.Stdout
+	cmd.Stderr = std.Stderr
+	return
+}
+
+func whenVerbose(tag, path string, args ...string) {
 	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
-		var s = []interface{}{prog + ":", viper.GetString("tag") + ":"}
-		if len(tag) > 0 {
-			s = append(s, tag + ":")
-		}
-		if viper.GetBool("dry-run") {
-			s = append(s, "dry-run:")
-		}
-		s = append(s, args.String())
-		// Write to stderr what would be run
-		fmt.Fprintln(stderr, s...)
-		// Return if dry-run
-		if viper.GetBool("dry-run") {
-			return nil
+		words := append([]string{path}, args...)
+		doVerbose(tag, words...)
+	}
+}
+
+func doVerbose(tag string, args ...string) {
+	var s = []string{viper.GetString("tag") + ":"}
+	if viper.GetBool("dry-run") {
+		s = append(s, "dry-run:")
+	}
+	if len(tag) > 0 {
+		s = append(s, tag + ":")
+	}
+	if len(args) > 0 {
+		s = append(s, args...)
+	}
+	inform(strings.Join(s, ` `))
+}
+
+func (line *CmdLine) preRun() (err error) {
+	discardSudo := (viper.GetInt("UID") == 0) || viper.GetBool("ambient")
+	words := line.words.Copy()
+	if words[0] == "exec" {
+		words = words[1:]
+	}
+	if words[0] == "$SUDO" {
+		if discardSudo {
+			words = words[1:]
+		} else {
+			words[0] = viper.GetString("sudo")
 		}
 	}
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
+	words.Filter(Empty)
+	if words.IsEmpty() {
+		err = fmt.Errorf("%w: empty command line", ErrInvalid)
+	}
+	*line = NewCmdLine(words...)
+	return
+}
+
+func (line CmdLine) Start(tag string, stdin io.Reader, stdout, stderr io.Writer) (cmd *exec.Cmd, err error) {
+	// line.Trace("Start")
+	err = line.preRun()
+	if err != nil {
+		return
+	}
+	cmd, err = line.getCmd(tag, &Streams{stdin, stdout, stderr})
+	if err != nil {
+		return
+	}
+	whenVerbose(tag, cmd.Path, cmd.Args[1:]...)
+	// Return if dry-run
+	if viper.GetBool("dry-run") {
+		return
+	}
+	cmd.SysProcAttr = &unix.SysProcAttr{
+		Setpgid: true,
+	}
+	err = cmd.Start()
+	return
+}
+
+func (line CmdLine) StartWait(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
+	// line.Trace("StartWait")
+	cmd, err := line.Start(tag, stdin, stdout, stderr)
+	if err != nil {
 		return err
+	}
+	// Return if dry-run
+	if viper.GetBool("dry-run") {
+		return nil
 	}
 	return cmd.Wait()
 }
 
-func (line CmdLine) ExecRun() error {
-	pos := 0
-	if line[pos] == "exec" {
-		pos++
+func (line CmdLine) Exec(tag string) error {
+	// line.Trace("Exec")
+	if err := line.preRun(); err != nil {
+		return err
 	}
-	command, err := lookPath(line[pos])
+	command, err := exec.LookPath(line.words[0])
 	if err != nil {
 		return err
 	}
-	if viper.GetBool("dry-run") {
-		// Write to stderr what would be run
-		fmt.Fprintln(
-			os.Stderr,
-			prog + ":",
-			viper.GetString("tag") + ":",
-			"dry-run:",
-			line[pos],
-			line[pos + 1:],
-		)
-	} else if viper.GetBool("verbose") {
-		// Write to stderr what would be run
-		fmt.Fprintln(
-			os.Stderr,
-			prog + ":",
-			viper.GetString("tag") + ":",
-			line[pos],
-			line[pos + 1:],
-		)
-	}
+	whenVerbose(tag, command, line.words[1:]...)
+	// Return if dry-run
 	if viper.GetBool("dry-run") {
 		return nil
 	}
-	args := append([]string{filepath.Base(command)}, line[pos + 1:]...)
+	// Do not propagate capabilities
+	nonfatal(clearAllCapabilities())
+	args := append([]string{filepath.Base(command)}, line.words[1:]...)
 	return unix.Exec(command, args, os.Environ())
 }
 
-func (line CmdLine) WriteTo(dest io.Writer) (n int, err error) {
-	n, err = fmt.Fprintf(dest, line.String() + "\n")
-	return
-}
-
-func (line CmdLine) WriteVerboseTo(dest io.Writer) (n int, err error) {
-	n, err = fmt.Fprintf(dest, "echo %s: %s: %s\n", prog, "run", line.String())
-	return
-}
-
 func (line CmdLine) Run(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
-	disableAmbient := false
-	if len(line) == 0 {
-		goto Empty
+	var flagExec bool
+	if line.Index(0) == "exec" {
+		flagExec = true
 	}
-	defer func() {
-		if disableAmbient {
-			if err := setAmbientSysNice(false); err != nil {
-				fmt.Fprintln(stderr, err)
-			}
-		}
-	}()
-	if viper.GetInt("UID") == 0 {
-		// Discard `$SUDO` for superuser if present
-		goto Discard
-	} else if line.RequireSysNice() {
-			if err := setAmbientSysNice(true); err == nil {
-				disableAmbient = true
-				// Discard `$SUDO` if present and CAP_SYS_NICE in local ambient set
-				goto Discard
-			} else {
-				fmt.Fprintln(stderr, err)
-				goto Fallback
-			}
-	} else {
-		// Fallback to sudo if required
-		goto Fallback
+	if flagExec {
+		return line.Exec(tag)
 	}
-
-	Discard:
-		if line[0] == "$SUDO" {
-			line = line[1:]
-		}
-		goto Run
-	Fallback:
-		if line[0] == "$SUDO" {
-			line[0] = viper.GetString("sudo")
-		}
-
-	Run:
-		if len(line) == 0 {
-			goto Empty
-		}
-		if line[0] == "exec" {
-			// Do not propagate capabilities
-			if err := setCapabilities(false); err != nil {
-				fmt.Fprintln(stderr, err)
-			}
-			return line.ExecRun()
-		}
-		return line.unprivilegedRun(tag, stdin, stdout, stderr)
-
-	Empty:
-		return fmt.Errorf("%w: empty command line", ErrInvalid)
+	return line.StartWait(tag, stdin, stdout, stderr)
 }
 
 func (line CmdLine) Trace(tag string) {
-	if viper.GetBool("debug") {
-		fmt.Fprintf(os.Stderr, "%s [0]:\t%#v\t\t[1:]:\t%#v\n", tag, line[0], line[1:])
-	}
+	debug(fmt.Sprintf("%s [0]:\t%#v\t\t[1:]:\t%#v\n", tag, line.words[0], line.words[1:]))
 }
-
-type LineFilter func(token string) bool
-
-var Empty LineFilter = func(token string) bool {
-	return len(token) == 0
-}
-
-func (line *CmdLine) Filter(f LineFilter) {
-	var buf CmdLine
-	for _, token := range *line {
-		if !(f(token)) {
-			buf = append(buf, token)
-		}
-	}
-	*line = buf
-}
-
-func (line CmdLine) Command() (command string) {
-	if len(line) > 0 {
-		command = line[0]
-	}
-	return
-}
-
-func (line CmdLine) Args() (args []string) {
-	if len(line) > 1 {
-		args = line[1:]
-	}
-	return
-}
-
 
 type Script []CmdLine
 
 func (script *Script) Append(lines ...CmdLine) {
-	slice := *script
-	// slice = append(slice, lines...)
 	for _, line := range lines {
-		line.Filter(Empty)
-		if len(line) > 0 {
-			slice = append(slice, line)
+		// line.words.Filter(Empty)
+		if !(line.IsEmpty()) {
+			*script = append(*script, line)
 		}
 	}
-	*script = slice
+}
+
+func (script *Script) Extend(other Script) {
+	*script = append(*script, other...)
 }
 
 func DecodeScript(input interface{}) (script Script, err error) {
@@ -317,11 +439,11 @@ func DecodeScript(input interface{}) (script Script, err error) {
 }
 
 func NewShellScript(shell string, lines ...CmdLine) (script Script) {
-	script.Append(CmdLine{"#!" + shell})
+	script.Append(NewCmdLine("#!" + shell))
 	for _, line := range lines {
-		line.Filter(Empty)
-		if len(line) > 0 {
-			if line[0] == "exec" {
+		line.words.Filter(Empty)
+		if !(line.IsEmpty()) {
+			if line.Index(0) == "exec" {
 				// Append first "$@"
 				line.Append(`"$@"`)
 			}
@@ -331,27 +453,32 @@ func NewShellScript(shell string, lines ...CmdLine) (script Script) {
 	return
 }
 
-func (script Script) RunCmdLines(args []string) (result []CmdLine) {
-	// Remove tests and shebang line from loop
-	for _, line := range []CmdLine(script) {
-		if strings.HasPrefix(line[0], "[") || strings.HasPrefix(line[0], "#!") {
-			continue
-		}
-		if line[0] == "exec" {
-			// Replace `"$@"` with runtime args
-			line = line[:len(line) - 1]
-			line.Append(args[1:]...)
-		}
-		result = append(result, line.Runtime(os.Getpid(), viper.GetInt("UID")))
+func (script Script) ShellLines() (result []string) {
+	for _, line := range script {
+		result = append(result, line.ShellLine())
 	}
 	return
 }
 
-func (script Script) ManageCmdLines() (result []CmdLine) {
-	// Remove tests from loop
-	for _, line := range []CmdLine(script) {
-		if strings.HasPrefix(line[0], "[") {
+func (script *Script) String() (result string) {
+	result = `[`
+	for _, line := range *script {
+		result = result + ` ` + line.String()
+	}
+	result = result + `]`
+	return
+}
+
+func (script Script) PrepareRun(args []string) (result []CmdLine) {
+	for _, line := range script {
+		// Remove tests and shebang line from loop
+		if line.skipWhenRun {
 			continue
+		}
+		// Append command args, if any, when required
+		if line.Index(0) == "exec" && len(args) > 0 {
+			quoted := ShellQuote(args)
+			line.Append(quoted...)
 		}
 		result = append(result, line)
 	}
@@ -359,23 +486,24 @@ func (script Script) ManageCmdLines() (result []CmdLine) {
 }
 
 func (script Script) Run(args []string) {
+	// get temp file
 	tmp, err := getTempFile(
 		viper.GetString("runtimedir"),
 		viper.GetString("PROG") + "_run_" + filepath.Base(args[0]) + "-*",
 	)
-	checkErr(err)
+	fatal(wrap(err))
+	// write script
 	name := tmp.Name()
 	tmp.WriteString(fmt.Sprintf("#!%s\n", viper.GetString("shell")))
 	tmp.WriteString(fmt.Sprintf("rm -f %s\n", name))
-	if viper.GetBool("debug") {
-		printErrf("Writing %q script... ", name)
-	}
+	debug(fmt.Sprintf("Writing %q script... ", name))
 	for _, line := range script {
-		if len(line) > 0 {
-			if line[0] == "exec" {
+		if !(line.IsEmpty()) {
+			word := line.Index(0)
+			if word == "exec" {
 				line.Append(args...)
 			}
-			if strings.HasPrefix(line[0], "[") {
+			if strings.Contains(word, "[") {
 				line.WriteTo(tmp)
 			} else if viper.GetBool("verbose") {
 				line.WriteVerboseTo(tmp)
@@ -384,24 +512,17 @@ func (script Script) Run(args []string) {
 			}
 		}
 	}
-	if viper.GetBool("debug") {
-		printErrln("Done.")
-	}
+	debug("Done.")
 	err = tmp.Close()
-	checkErr(err)
+	fatal(wrap(err))
 	err = os.Chmod(name, 0755)
-	checkErr(err)
-
-	if viper.GetBool("debug") {
-		printErrf("Running %q script... \n", name)
-	}
+	fatal(wrap(err))
+	// run script
+	debug(fmt.Sprintf("Running %q script... \n", name))
 	shell := viper.GetString("shell")
-	err = unix.Exec(
-		shell,
-		[]string{filepath.Base(shell), "-c", name},
-		os.Environ(),
-	)
-	checkErr(err)
+	cmd := NewCmdLine(shell, "-c", name)
+	_, err = cmd.Start("", nil, os.Stdout, os.Stderr)
+	fatal(wrap(err))
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

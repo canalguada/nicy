@@ -4,7 +4,7 @@ package		= nicy
 program		= nicy
 git_branch	= master
 version		= 0.1.6
-revision	= 1
+revision	= 3
 release_dir	= build
 prefix		= /usr/local
 bindir		= $(prefix)/bin
@@ -21,7 +21,7 @@ build:
 
 .PHONY: capabilities
 capabilities:
-	$(SUDO) /usr/sbin/setcap "cap_setpcap,cap_sys_nice=p" ./$(program)
+	$(SUDO) /usr/sbin/setcap "cap_setpcap,cap_sys_nice,cap_sys_resource=p" ./$(program)
 
 .PHONY: default
 default: build capabilities

@@ -454,7 +454,7 @@ func NewProcMap(p *Proc) *ProcMap {
 	return pm
 }
 
-func (pm *ProcMap) Map() map[string]interface{} {
+func (pm *ProcMap) GetStringMap() map[string]interface{} {
 	data, err := json.Marshal(*pm)
 	panicIfError(err)
 	result := make(map[string]interface{})
@@ -462,8 +462,8 @@ func (pm *ProcMap) Map() map[string]interface{} {
 	return result
 }
 
-func (p *Proc) Map() map[string]interface{} {
-	return NewProcMap(p).Map()
+func (p *Proc) GetStringMap() map[string]interface{} {
+	return NewProcMap(p).GetStringMap()
 }
 
 func (p *Proc) InUserSlice() bool {
@@ -526,18 +526,14 @@ func GetFormatter(format string) Formatter {
 	}
 }
 
-// ByPid implements sort.Interface for []Proc based on Pid field
-type ByPid []Proc
+// ProcByPid implements sort.Interface for []Proc based on Pid field
+type ProcByPid []Proc
+func (s ProcByPid) Len() int { return len(s) }
+func (s ProcByPid) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s ProcByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
 
-func (s ByPid) Len() int { return len(s) }
-
-func (s ByPid) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-
-func (s ByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
-
-// AllProcs returns a list of all currently available processes.
-// Filters result with filterFunc, if not nil.
-func AllProcs(filterFunc Filter) (result []Proc) {
+// FilteredProcs returns a slice of Proc for filtered processes.
+func FilteredProcs(filter Filter) (result []Proc) {
 	files, _ := filepath.Glob("/proc/[0-9]*/stat")
 	size := len(files)
 	result = make([]Proc, 0, size)
@@ -555,7 +551,7 @@ func AllProcs(filterFunc Filter) (result []Proc) {
 			var err error
 			for stat := range stats {
 				p, err = NewProcFromStat(stat)
-				if filterFunc(p, err) {
+				if filter(p, err) {
 					procs <- *p
 				}
 			}
@@ -582,7 +578,65 @@ func AllProcs(filterFunc Filter) (result []Proc) {
 		result = append(result, p)
 	}
 	// sort by Pid
-	sort.Sort(ByPid(result))
+	sort.Sort(ProcByPid(result))
+	return
+}
+
+// ProcMapByPid implements sort.Interface for []ProcMap based on Pid field
+type ProcMapByPid []ProcMap
+func (s ProcMapByPid) Len() int { return len(s) }
+func (s ProcMapByPid) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s ProcMapByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
+
+// FilteredProcMaps returns a slice of ProcMap for filtered processes.
+func FilteredProcMaps(filter Filter) (result []ProcMap, err error) {
+	files, err := filepath.Glob("/proc/[0-9]*/stat")
+	if err != nil {
+		return
+	}
+	// prepare channels
+	stats := make(chan string, 8)
+	procmaps := make(chan ProcMap, 8)
+	// spin up workers and use a sync.WaitGroup to indicate completion
+	var count = runtime.GOMAXPROCS(0)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(stats <-chan string, procmaps chan<- ProcMap, wg *sync.WaitGroup){
+			defer wg.Done()
+			var p *Proc
+			var err error
+			for stat := range stats {
+				p, err = NewProcFromStat(stat)
+				if filter(p, err) {
+					procmaps <- *NewProcMap(p)
+				}
+			}
+		}(stats, procmaps, &wg)
+	}
+	// start sending jobs
+	wg.Add(1)
+	go func(stats chan<- string, wg *sync.WaitGroup) {
+		defer close(stats)
+		for _, file := range files {
+			data, err := ioutil.ReadFile(file)
+			if err == nil {
+				stats <- string(data)
+			}
+		}
+	}(stats, &wg)
+	// wait on the workers to finish and close the result channel
+	// to signal downstream that all work is done
+	go func() {
+		defer close(procmaps)
+		wg.Wait()
+	}()
+	// collect result
+	for pm := range procmaps {
+		result = append(result, pm)
+	}
+	// sort by Pid
+	sort.Sort(ProcMapByPid(result))
 	return
 }
 

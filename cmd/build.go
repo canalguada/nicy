@@ -25,7 +25,7 @@ import (
 
 // buildCmd represents the list command
 var buildCmd = &cobra.Command{
-	Use:   "build [--force]",
+	Use:   "build [-f]",
 	Short: "Build json cache",
 	Long: `Build the json cache and exit`,
 	Args: cobra.ExactArgs(0),
@@ -41,8 +41,8 @@ var buildCmd = &cobra.Command{
 		// Real job goes here
 		cacheFile := viper.GetString("database")
 		if !(exists(cacheFile)) || viper.GetBool("force") {
-			cacheContent := make(map[string]interface{}, 4)
-			cacheContent["date"] = timestamp()
+			content := make(map[string]interface{}, 4)
+			content["date"] = timestamp()
 			for _, category := range [3]string{"cgroups", "types", "rules"} {
 				file := viper.GetString(category)
 				if !(exists(file)) || viper.GetBool("force") {
@@ -50,32 +50,32 @@ var buildCmd = &cobra.Command{
 					result := make([]interface{}, 0, 128)
 					for _, root := range viper.GetStringSlice("confdirs") {
 						objects, err := dumpObjects(category, expandPath(root))
-						checkErr(err)
+						fatal(wrap(err))
 						result = append(result, objects...)
 					}
-					cacheContent[category] = result
+					content[category] = result
 					// Write to category cache file
 					data, err := json.MarshalIndent(result, "", "  ")
-					checkErr(err)
+					fatal(wrap(err))
 					cmd.PrintErrf("Writing content of %s files into cache... ", category)
 					_, err = writeTo(file, data)
-					checkErr(err)
+					fatal(wrap(err))
 					cmd.PrintErrln("Done.")
 				} else {
 					// Read content from category cache file
 					cmd.PrintErrf("Reading %s objects from cache... ", category)
-					result, err := readCategoryCache(category)
-					checkErr(err)
-					cacheContent[category] = result
+					result, err := ReadCategoryCache(category)
+					fatal(wrap(err))
+					content[category] = result
 					cmd.PrintErrln("Done.")
 				}
 			}
-			data, err := json.MarshalIndent(cacheContent, "", "  ")
-			checkErr(err)
+			data, err := json.MarshalIndent(content, "", "  ")
+			fatal(wrap(err))
 			// Write to category cache file
 			cmd.PrintErrf("Writing %q cache file... ", cacheFile)
 			_, err = writeTo(cacheFile, data)
-			checkErr(err)
+			fatal(wrap(err))
 			cmd.PrintErrln("Done.")
 		}
 	},

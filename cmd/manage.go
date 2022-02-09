@@ -30,7 +30,7 @@ import (
 
 // manageCmd represents the manage command
 var manageCmd = &cobra.Command{
-	Use:   "manage [-n] [--user|--global|--system|--all]",
+	Use:   "manage [-n] [-u|-g|-s|-a]",
 	Short: "Manage running processes",
 	Long: `Manage the running processes, applying presets
 
@@ -52,42 +52,40 @@ The processes are managed per process group, when a specific rule is available f
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		var filterFunc process.Filter
+		var filter process.Filter
 		var message string
 		switch {
 		case viper.GetBool("user"):
-			filterFunc = process.GetFilter("user")
+			filter = process.GetFilter("user")
 			message = "calling user processes"
 		case viper.GetBool("global"):
-			filterFunc = process.GetFilter("global")
+			filter = process.GetFilter("global")
 			message = "processes inside any user slice"
 		case viper.GetBool("system"):
-			filterFunc = process.GetFilter("system")
+			filter = process.GetFilter("system")
 			message = "processes inside system slice"
 		case viper.GetBool("all"):
-			filterFunc = process.GetFilter("all")
+			filter = process.GetFilter("all")
 			message = "all processes"
 		default:
-			filterFunc = process.GetFilter("user")
+			filter = process.GetFilter("user")
 			message = "calling user processes"
 		}
 		// Get result
 		if viper.GetBool("verbose") {
-			cmd.PrintErrln("Managing ", message + "...")
+			cmd.PrintErrln("Managing", message + "...")
 		}
-		jobs, err := streamProcAdjust(filterFunc)
-		checkErr(err)
-		if len(jobs) > 0 {
-			if err := setCapabilities(true); err != nil {
+		if err := setCapabilities(true); err != nil {
+			cmd.PrintErrln(err)
+		}
+		defer func() {
+			if err := setCapabilities(false); err != nil {
 				cmd.PrintErrln(err)
 			}
-			defer func() {
-				if err := setCapabilities(false); err != nil {
-					cmd.PrintErrln(err)
-				}
-			}()
-			runProcAdjust(jobs, cmd.OutOrStdout(), cmd.ErrOrStderr())
-		}
+		}()
+		err := manageCommand("", filter, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		fatal(wrap(err))
+		// cmd.Println(prettyJson(getManageInput(filter)))
 	},
 }
 

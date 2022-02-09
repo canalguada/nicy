@@ -20,14 +20,16 @@ import (
 	"fmt"
 	"os"
 	"io"
+	"io/ioutil"
 	"bytes"
 	"strings"
 	"strconv"
+	"log"
 	"text/tabwriter"
+	"encoding/json"
 	"path/filepath"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
-	"kernel.org/pub/linux/libs/security/libcap/cap"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
@@ -37,7 +39,28 @@ const (
 	version = "0.1.6"
 )
 
-var cfgFile string
+var (
+	cfgFile string
+	logger = log.New(os.Stderr, prog + ": ", 0)
+)
+
+func debug(v ...interface{}) {
+	if viper.GetBool("debug") {
+		lv := []interface{}{"debug:"}
+		lv = append(lv, v...)
+		logger.Println(lv...)
+	}
+}
+
+func warn(v ...interface{}) {
+	lv := []interface{}{"error:"}
+	lv = append(lv, v...)
+	logger.Println(lv...)
+}
+
+func inform(v ...interface{}) {
+	logger.Println(v...)
+}
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -65,7 +88,7 @@ launching a command.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	checkErr(rootCmd.Execute())
+	fatal(rootCmd.Execute())
 }
 
 // Flags
@@ -73,14 +96,18 @@ func Execute() {
 func addRunShowFlags(cmd *cobra.Command) {
 	fs := cmd.Flags()
 	fs.BoolP("quiet", "q", false, "suppress additional output")
-	fs.BoolP("verbose", "v", false, "be verbose when running external commands")
 	fs.StringP("preset", "p", "auto", "apply this `PRESET`")
-	fs.BoolP("default", "d", false, "like --preset=default")
-	fs.BoolP("cgroup-only", "z", false, "like --preset=cgroup-only")
+	fs.BoolP("default", "d", false, "like --preset default")
+	fs.BoolP("cgroup-only", "z", false, "like --preset cgroup-only")
 	fs.StringP("cgroup", "c", "", "run as part of this `CGROUP`")
-	fs.Int("cpu", 0, "like --cgroup=cpu`QUOTA`")
+	fs.Int("cpu", 0, "like --cgroup cpu`QUOTA`")
 	fs.BoolP("managed", "m", false, "always run inside its own scope")
 	fs.BoolP("force-cgroup", "u", false, "run inside a cgroup matching properties")
+}
+
+func addVerboseFlag(cmd *cobra.Command) {
+	fs := cmd.Flags()
+	fs.BoolP("verbose", "v", false, "be verbose when running external commands")
 }
 
 func addDryRunFlag(cmd *cobra.Command) {
@@ -90,9 +117,9 @@ func addDryRunFlag(cmd *cobra.Command) {
 
 func addDumpManageFlags(cmd *cobra.Command) {
 	fs := cmd.Flags()
-	fs.BoolP("user", "u", false, "only processes running inside calling user slice")
-	fs.BoolP("global", "g", false, "processes running inside any user slice")
-	fs.BoolP("system", "s", false, "only processes running inside system slice")
+	fs.BoolP("user", "u", false, "only processes from calling user slice")
+	fs.BoolP("global", "g", false, "processes from any user slice")
+	fs.BoolP("system", "s", false, "only processes from system slice")
 	fs.BoolP("all", "a", false, "all running processes")
 }
 
@@ -143,19 +170,16 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 }
 
-func printErrln(a ...interface{}) (n int, err error){
-	n, err = fmt.Fprintln(os.Stderr, a...)
-	return
+func exists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+	return true
 }
 
-func printErrf(format string, a ...interface{}) (n int, err error){
-	n, err = fmt.Fprintf(os.Stderr, format, a...)
-	return
-}
-
-func createDirectoryIfNotExist(name string, perm os.FileMode) error {
-	if _, err := os.Stat(name); os.IsNotExist(err) {
-		return os.MkdirAll(name, perm)
+func createDirectoryIfNotExist(dirname string, perm os.FileMode) error {
+	if !(exists(dirname)) {
+		return os.MkdirAll(dirname, perm)
 	}
 	return nil
 }
@@ -170,13 +194,13 @@ func expandPath(path string) string {
 
 func mergeConfigFile(path string) error {
 	if exists(path) {
-		configBytes, err := readFile(path)
+		configBytes, err := ioutil.ReadFile(path)
 		if err != nil {
-			return err
+			return wrap(err)
 		}
 		// Find and read the config file
 		if err = viper.MergeConfig(bytes.NewBuffer(configBytes)); err != nil {
-			return wrapError(err)
+			return wrap(err)
 		}
 	} else {
 		return fmt.Errorf("%w: %v", ErrNotFound, path)
@@ -202,7 +226,7 @@ func initConfig() {
 		//  Configuration in %XDG_CONFIG_HOME%/%prog% will take precedence
 		// Find HOME
 		path, err = homedir.Dir() // Required
-		checkErr(wrapError(err))
+		fatal(wrap(err))
 		viper.SetDefault("HOME", path)
 		// Then XDG_CONFIG_HOME
 		path, _ = os.UserConfigDir() // No error, HOME is defined
@@ -229,8 +253,8 @@ func initConfig() {
 	viper.SetDefault("XDG_RUNTIME_DIR", path)
 	viper.SetDefault("runtimedir", filepath.Join(path, prog))
 	// Create required directories
-	checkErr(createDirectoryIfNotExist(viper.GetString("cachedir"), 0755))
-	checkErr(createDirectoryIfNotExist(viper.GetString("runtimedir"), 0755))
+	fatal(createDirectoryIfNotExist(viper.GetString("cachedir"), 0755))
+	fatal(createDirectoryIfNotExist(viper.GetString("runtimedir"), 0755))
 	// Default configuration search paths (in order of precedence)
 	var configPaths []string
 	if uid != 0 {
@@ -249,7 +273,9 @@ func initConfig() {
 	viper.SetDefault("scripts", path)
 	// Main default values
 	viper.SetDefault("confdirs", configPaths)
-	viper.SetDefault("libdir", filepath.Join("/usr/lib", prog))
+	libdir := filepath.Join("/usr/lib", prog)
+	viper.SetDefault("libdir", libdir)
+	viper.SetDefault("jqlibdir", filepath.Join(libdir, "jq"))
 	viper.SetDefault("shell", "/bin/sh")
 	// Config files
 	viper.SetConfigName("config")
@@ -258,17 +284,13 @@ func initConfig() {
 	for i := len(configPaths) - 1; i >= 0; i-- {
 		path = filepath.Join(configPaths[i], "config.yaml")
 		if err = mergeConfigFile(path); err != nil {
-			if viper.GetBool("debug") {
-				printErrln(err)
-			}
+			debug(err)
 		}
 	}
 	// Then merge config file that user set with the flag
 	if cfgFile != "" {
 		if err = mergeConfigFile(cfgFile); err != nil {
-			if viper.GetBool("debug") {
-				printErrln(err)
-			}
+			debug(err)
 		}
 	}
 	// Allow use of environment variables
@@ -277,15 +299,15 @@ func initConfig() {
 	// Provide SUDO environment variable to jq scripts.
 	os.Setenv("SUDO", viper.GetString("sudo"))
 	// Debug
-	if viper.GetBool("debug") {
-		// Display the capabilities of the running process
-		printErrln("caps:", cap.GetProc())
-		if viper.ConfigFileUsed() != "" {
-			printErrln("config file:", viper.ConfigFileUsed())
-		}
-		viper.WriteConfigAs(filepath.Join(viper.GetString("runtimedir"), "viper.yaml"))
+	// Display the capabilities of the running process
+	debug(getCapabilities())
+	if viper.ConfigFileUsed() != "" {
+		debug("config file:", viper.ConfigFileUsed())
 	}
+	viper.WriteConfigAs(filepath.Join(viper.GetString("runtimedir"), "viper.yaml"))
 }
+
+// Various
 
 func init() {
 	// System utilities require CAP_SYS_NICE.
@@ -296,54 +318,29 @@ func init() {
 
 // More functions
 
-func setCapabilities(enable bool) error {
-	c := cap.GetProc()
-	if err := c.SetFlag(cap.Effective, enable, cap.SETPCAP, cap.SYS_NICE); err != nil {
-		return fmt.Errorf("unable to set capability: %v", err)
-	}
-	if err := c.SetFlag(cap.Inheritable, enable, cap.SYS_NICE); err != nil {
-		return fmt.Errorf("unable to set capability: %v", err)
-	}
-	if err := c.SetProc(); err != nil {
-		return fmt.Errorf("unable to raise capabilities %q: %v", c, err)
-	}
-	return nil
-}
-
-func setAmbientSysNice(enable bool) (err error) {
-	// Set CAP_SYS_NICE in local ambient set
-	err = cap.SetAmbient(true, cap.SYS_NICE)
-	return
-	// // Get ambient
-	// ok, err := cap.GetAmbient(cap.SYS_NICE)
-	// switch {
-	// case err != nil:
-	//   return false, err
-	// case !(ok):
-	//   if viper.GetBool("debug") {
-	//     printErrln(prog + ": run: CAP_SYS_NICE is not in local ambient set")
-	//   }
-	//   return false, nil
-	// default:
-	//   return true, nil
-	// }
+func getTabWriter(output io.Writer) *tabwriter.Writer {
+	// output, minwidth, tabwidth, padding, padchar, flags
+	return tabwriter.NewWriter(output, 8, 8, 0, '\t', 0)
 }
 
 func debugOutput(cmd *cobra.Command) {
 	if viper.GetBool("debug") {
-		tw := getTabWriter(cmd.ErrOrStderr())
-		fmt.Fprintf(cmd.ErrOrStderr(), "command:\n%#v\n", cmd.Name())
-		tw.Write([]byte("key:\tvalue\n"))
-		for _, k := range viper.AllKeys() {
-			tw.Write([]byte(fmt.Sprintf("%s:\t%#v\n", k, viper.Get(k))))
+		// tw := getTabWriter(cmd.ErrOrStderr())
+		// tw.Write([]byte(fmt.Sprintf("command:\t%#v\n", cmd.Name())))
+		// tw.Write([]byte("key:\tvalue\n"))
+		// for _, k := range viper.AllKeys() {
+		//   tw.Write([]byte(fmt.Sprintf("%s:\t%#v\n", k, viper.Get(k))))
+		// }
+		// tw.Flush()
+		config := viper.AllSettings()
+		config["command"] = cmd.Name()
+		data, err := json.Marshal(config)
+		if err != nil {
+			warn(err)
+		} else {
+			debug(string(data))
 		}
-		tw.Flush()
 	}
-}
-
-func getTabWriter(output io.Writer) *tabwriter.Writer {
-	// output, minwidth, tabwidth, padding, padchar, flags
-	return tabwriter.NewWriter(output, 8, 8, 0, '\t', 0)
 }
 
 // checkConsistency returns an error if two or more mutually exclusive flags
@@ -359,9 +356,7 @@ func checkConsistency(fs *flag.FlagSet, flagNames []string) error {
 		}
 	}
 	switch count {
-	case 0:
-		return nil
-	case 1:
+	case 0, 1:
 		return nil
 	case 2:
 		msg = fmt.Sprintf("--%s and --%s", changed[0], changed[1])

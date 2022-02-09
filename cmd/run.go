@@ -18,7 +18,7 @@ package cmd
 
 import (
 	// "fmt"
-	"os"
+	// "os"
 	// "strings"
 	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
@@ -26,11 +26,11 @@ import (
 )
 
 
-// showCmd represents the show command
-var showCmd = &cobra.Command{
-	Use:   "show [-q] [-p PRESET|-d|-z] [-c CGROUP|--cpu QUOTA] [-m] [-u] COMMAND",
-	Short: "Show effective script for given command",
-	Long: `Show the effective script for the given COMMAND
+// runCmd represents the run command
+var runCmd = &cobra.Command{
+	Use:   "run [-n] [-q|-v] [-p PRESET|-d|-z] [-c CGROUP|--cpu QUOTA] [-m] [-u] COMMAND [ARGUMENT]...",
+	Short: "Run given command in pre-set execution environment",
+	Long: `Run the COMMAND with its ARGUMENT(S) in a pre-set execution environment
 
 The PRESET argument can be: 'auto' to use some specific rule for the command, if available; 'cgroup-only' to use only the cgroup properties of that rule, if any; 'default' to use this special fallback preset; or any other generic type. The CGROUP argument can be a cgroup defined in configuration files. The QUOTA argument can be an integer ranging from 1 to 99 that represents a percentage relative to the total CPU time available on all cores.`,
 	Args: cobra.MinimumNArgs(1),
@@ -39,6 +39,7 @@ The PRESET argument can be: 'auto' to use some specific rule for the command, if
 		var err error
 		fs := cmd.LocalNonPersistentFlags()
 		for _, slice := range [3][]string{
+			[]string{"quiet", "verbose"},
 			[]string{"preset", "default", "cgroup-only"},
 			[]string{"cgroup", "cpu"},
 		} {
@@ -50,7 +51,7 @@ The PRESET argument can be: 'auto' to use some specific rule for the command, if
 		// Bind shared flags
 		bindFlags(
 			cmd,
-			"quiet", "preset", "default",
+			"dry-run", "quiet", "verbose", "preset", "default",
 			"cgroup-only", "cgroup", "cpu", "managed", "force-cgroup",
 		)
 		// Set runtime values where needed
@@ -66,37 +67,44 @@ The PRESET argument can be: 'auto' to use some specific rule for the command, if
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		viper.Set("tag", "show")
+		viper.Set("tag", "run")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		lines, err := showCommand(viper.GetString("shell"), args)
-		fatal(wrap(err))
-		cmd.SetOut(os.Stdout)
-		for _, line := range lines {
-			cmd.Println(line)
+		if err := setCapabilities(true); err != nil {
+			cmd.PrintErrln(err)
+		}
+		defer func() {
+			if err := setCapabilities(false); err != nil {
+				cmd.PrintErrln(err)
+			}
+		}()
+		if err := runCommand("", args, nil, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+			cmd.PrintErrln(err)
 		}
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(showCmd)
+	// rootCmd.AddCommand(runCmd)
 
 	// Here you will define your flags and configuration settings.
 
 	// Cobra supports Persistent Flags which will work for this command
 	// and all subcommands, e.g.:
-	// showCmd.PersistentFlags().String("foo", "", "A help for foo")
+	// runCmd.PersistentFlags().String("foo", "", "A help for foo")
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fs := showCmd.Flags()
+	fs := runCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
 
-	addRunShowFlags(showCmd)
+	addRunShowFlags(runCmd)
+	addDryRunFlag(runCmd)
+	addVerboseFlag(runCmd)
 
-	showCmd.InheritedFlags().SortFlags = false
+	runCmd.InheritedFlags().SortFlags = false
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:
