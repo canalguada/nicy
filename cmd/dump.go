@@ -17,8 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	// "os"
-	"github.com/canalguada/nicy/process"
 	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -27,14 +25,14 @@ import (
 // dumpCmd represents the dump command
 var dumpCmd = &cobra.Command{
 	Use:   "dump [-u|-g|-s|-a] [-r|-j|-v]",
-	Short: "Dump running processes statistics",
-	Long: `Dump statistics for the running processes`,
+	Short: "Dump processes information",
+	Long: `Dump information on the running processes`,
 	Args: cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		var slices = map[int][]string{
-			0: []string{"user", "global", "system", "all"},
-			1: []string{"json", "raw", "values"},
+			0: cfgMap["scopes"],
+			1: cfgMap["formats"],
 		}
 		fs := cmd.LocalNonPersistentFlags()
 		for key := range slices {
@@ -43,52 +41,33 @@ var dumpCmd = &cobra.Command{
 			}
 		}
 		// Bind shared flags
-		bindFlags(
-			cmd,
-			"user", "global", "system", "all",
-			"raw", "json", "values",
-		)
+		names := append(cfgMap["scopes"], cfgMap["formats"]...)
+		bindFlags(cmd, names...)
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		var filter process.Filter
-		var formatter process.Formatter
-		var message string
-		switch {
-		case viper.GetBool("user"):
-			filter = process.GetFilter("user")
-			message = "calling user processes"
-		case viper.GetBool("global"):
-			filter = process.GetFilter("global")
-			message = "processes inside any user slice"
-		case viper.GetBool("system"):
-			filter = process.GetFilter("system")
-			message = "processes inside system slice"
-		case viper.GetBool("all"):
-			filter = process.GetFilter("all")
-			message = "all processes"
-		default:
-			filter = process.GetFilter("user")
-			message = "calling user processes"
+		var (
+			scope = "user"
+			format = "string"
+		)
+		if value, ok := firstTrue(cfgMap["scopes"]); ok {
+			scope = value
 		}
+		if value, ok := firstTrue(cfgMap["formats"]); ok {
+			format = value
+		}
+		var (
+			filterer = GetFilterer(scope)
+			formatter = GetFormatter(format)
+		)
 		if viper.GetBool("verbose") {
-			cmd.PrintErrln("Dumping stats for", message + "...")
+			cmd.PrintErrln("Dumping stats for", filterer.String() + "...")
 		}
-		switch {
-		case viper.GetBool("json"):
-			formatter = process.GetFormatter("json")
-		case viper.GetBool("raw"):
-			formatter = process.GetFormatter("raw")
-		case viper.GetBool("values"):
-			formatter = process.GetFormatter("values")
-		default:
-			formatter = process.GetFormatter("string")
-		}
-		for _, p := range process.FilteredProcs(filter) {
-			cmd.Println(formatter(&p))
+		for _, p := range FilteredProcs(filterer) {
+			cmd.Println(formatter(p))
 		}
 	},
 }

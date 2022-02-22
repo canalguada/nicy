@@ -2,7 +2,7 @@ Package: nicy
 Version: VERSION
 Section: custom
 Priority: optional
-Architecture: ARCH
+Architecture: i386
 Depends: systemd
 Maintainer: David GUADALUPE <guadalupe.david@gmail.com>
 Homepage: https://github.com/canalguada/nicy

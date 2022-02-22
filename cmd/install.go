@@ -17,70 +17,61 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"fmt"
+	// "fmt"
+	// "os"
+	// "strings"
+	// "encoding/json"
 	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-// listCmd represents the list command
-var listCmd = &cobra.Command{
-	Use:   "list [-n] [-f DIRECTORY] CATEGORY",
-	Short: "List category content",
-	Long: `List the content of cgroups, types or rules CATEGORY, removing all duplicates
+// installCmd represents the install command
+var installCmd = &cobra.Command{
+	Use:   "install [-r] [--shell SHELL] [--dest DESTDIR]",
+	Short: "Install scripts",
+	Long: `Install a shell script for each rule matching a command found in PATH.
 
-The CATEGORY argument matches the extensions of configuration files.
-Valid categories are 'rules', 'types' or 'cgroups'.
-The DIRECTORY argument can be one out of preconfigured directories.
-When filtering from DIRECTORY, show otherwise duplicates.`,
-	ValidArgs: []string{"cgroups", "types", "rules"},
-	Args: cobra.ExactValidArgs(1),
+The SHELL argument is a path to a POSIX shell. Default value is /bin/sh.
+The installation path is set to :
+- $HOME/bin/nicy for regular user;
+- /usr/local/bin/nicy for system user;
+- any writable path DESTDIR with --dest option.`,
+	Args: cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		// Bind flags
-		bindFlags(cmd, "from", "no-headers")
+		bindFlags(cmd, "shell", "dest")
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
+		viper.Set("tag", "install")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		output, err := listObjects(args[0])
-		fatal(wrap(err))
-
-		tw := getTabWriter(cmd.OutOrStdout())
-		// To update writer
-		// tw.Init(cmd.OutOrStdout(), 8, 8, 0, '\t', 0)
-		defer tw.Flush()
-
-		if viper.GetBool("no-headers") {
-			output = output[1:]
-		}
-		for _, line := range output {
-			fmt.Fprintln(tw, line)
-		}
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(listCmd)
+	// rootCmd.AddCommand(installCmd)
 
 	// Here you will define your flags and configuration settings.
 
 	// Cobra supports Persistent Flags which will work for this command
 	// and all subcommands, e.g.:
-	// listCmd.PersistentFlags().String("foo", "", "A help for foo")
+	// installCmd.PersistentFlags().String("foo", "", "A help for foo")
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fs := listCmd.Flags()
+	fs := installCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
 
-	fs.StringP("from", "f", "", "list only objects from `DIRECTORY`")
-	fs.BoolP("no-headers", "n", false, "do not print headers")
+	fs.String("shell", "", "generate script for `SHELL`")
+	fs.String("dest", "", "install inside `DESTDIR`")
+	fs.BoolP("run", "r", false, "use run command")
 
-	listCmd.InheritedFlags().SortFlags = false
+	installCmd.InheritedFlags().SortFlags = false
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

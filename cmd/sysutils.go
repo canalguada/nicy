@@ -25,6 +25,16 @@ import (
 )
 
 
+var (
+	effective []cap.Value
+	inheritable []cap.Value
+)
+
+func init() {
+	inheritable = []cap.Value{cap.SYS_NICE, cap.SYS_RESOURCE}
+	effective = append([]cap.Value{cap.SETPCAP}, inheritable...)
+}
+
 func rlimitNice() *unix.Rlimit {
 	var rLimit unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NICE, &rLimit); err != nil {
@@ -59,16 +69,6 @@ func clearAllCapabilities() error {
 		return fmt.Errorf("%w: unable to update %q: %v", ErrFailure, c, err)
 	}
 	return setDumpable()
-}
-
-var (
-	effective []cap.Value
-	inheritable []cap.Value
-)
-
-func init() {
-	inheritable = []cap.Value{cap.SYS_NICE, cap.SYS_RESOURCE}
-	effective = append([]cap.Value{cap.SETPCAP}, inheritable...)
 }
 
 func getCapabilities() string {

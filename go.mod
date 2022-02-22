@@ -3,7 +3,6 @@ module github.com/canalguada/nicy
 go 1.15
 
 require (
-	github.com/itchyny/gojq v0.12.4
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
 	github.com/mitchellh/go-homedir v1.0.0
 	github.com/spf13/cobra v1.2.1

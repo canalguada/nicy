@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"context"
+	"os/signal"
 	"bufio"
 	"regexp"
 	"io"
@@ -33,10 +35,29 @@ import (
 	"sync"
 	"golang.org/x/sys/unix"
 	"github.com/canalguada/nicy/process"
-	// "github.com/canalguada/nicy/jq"
 	"github.com/spf13/viper"
 )
 
+type (
+	Proc = process.Proc
+	ProcMap = process.ProcMap
+	Filterer = process.Filterer
+	ProcMapByPgrp = process.ProcMapByPgrp
+)
+
+var (
+	GetCalling = process.GetCalling
+	NewProcMap = process.NewProcMap
+	// FilteredProcs func (filter Filterer) []*Proc = process.FilteredProcs
+	FilteredProcs = process.FilteredProcs
+	GetFilterer = process.GetFilterer
+	GetFormatter = process.GetFormatter
+	reNoComment *regexp.Regexp
+)
+
+func init() {
+	reNoComment = regexp.MustCompile(`^[ ]*#`)
+}
 
 // Build command
 
@@ -67,8 +88,7 @@ func findFiles(root, pattern string, mindepth, maxdepth int) (result []string, e
 		root,
 		func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				// Failure accessing path
-				return err
+				return err // Failure accessing path
 			}
 			if path == root {
 				depth = 0
@@ -81,8 +101,7 @@ func findFiles(root, pattern string, mindepth, maxdepth int) (result []string, e
 			}
 			matched, err := filepath.Match(pattern, info.Name())
 			if err != nil {
-				// Invalid pattern
-				return err
+				return err // Invalid pattern
 			}
 			if matched {
 				result = append(result, path)
@@ -126,23 +145,23 @@ func appendTo(path string, buf []byte) (n int, err error) {
 	return
 }
 
-type UnmarshalFunc func(s string) (CStringMap, error)
+type stringToStringMap func(s string) (CStringMap, error)
 
-func dumpContent(path string, fn UnmarshalFunc) (content CSlice, err error) {
-	var bufline []byte
-	var item CStringMap
-	re := regexp.MustCompile(`^[ ]*#`)
+func dumpContent(path string, function stringToStringMap) (content CSlice, err error) {
+	var (
+		bufline []byte
+		item CStringMap
+	)
 	file, err := os.Open(path)
 	if err != nil {
 		return
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
-	// optionally, resize scanner's capacity for content over 64K
 	for scanner.Scan() {
 		bufline = scanner.Bytes()
-		if len(bufline) != 0 && !(re.Match(bufline)) {
-			item, err = fn(scanner.Text())
+		if len(bufline) != 0 && !(reNoComment.Match(bufline)) {
+			item, err = function(scanner.Text())
 			if err != nil {
 				return
 			}
@@ -157,8 +176,8 @@ func dumpContent(path string, fn UnmarshalFunc) (content CSlice, err error) {
 
 func dumpObjects(category, root string) (objects CSlice, err error) {
 	var mindepth, maxdepth int
-	pattern := fmt.Sprintf("*.%s", category)
-	if category == "rules" {
+	pattern := fmt.Sprintf("*.%ss", category)
+	if category == "rule" {
 		mindepth = 1
 		maxdepth = 10
 	}
@@ -168,19 +187,15 @@ func dumpObjects(category, root string) (objects CSlice, err error) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(files)))
 	for _, file := range files {
-		// Each line contains a json object to unmarshal into
-		// CStringMap
-		lines, e := dumpContent(
-			file,
-			func(s string) (CStringMap, error) {
-				var result CStringMap
-				if err := json.Unmarshal([]byte(s), &result); err != nil {
-					return nil, err
-				}
-				result["origin"] = root
-				return result, nil
-			},
-		)
+		// Each line contains a json object to unmarshal into CStringMap
+		lines, e := dumpContent(file, func(s string) (CStringMap, error) {
+			var result CStringMap
+			if err := json.Unmarshal([]byte(s), &result); err != nil {
+				return nil, err
+			}
+			result["origin"] = root
+			return result, nil
+		})
 		objects = append(objects, lines...)
 		if e != nil {
 			err = e
@@ -192,37 +207,23 @@ func dumpObjects(category, root string) (objects CSlice, err error) {
 
 // List command
 
-func listObjects(category string) (output CSlice, err error) {
-	var input CSlice
-	// Prepare input
-	if viper.IsSet("from") {
-		input = CSlice{viper.Get("from")}
-	} else {
-		slice := viper.GetStringSlice("confdirs")
-		input = make(CSlice, len(slice))
-		for i, path := range slice {
-			input[i] = expandPath(path)
-		}
-	}
-	// Prepare variables
-	cacheContent, err = ReadCache()
+func listObjects(category string) (output []string, err error) {
+	contentCache, err = ReadFile() // get cache content
 	fatal(wrap(err))
-	// Prepare request
-	req := NewCacheRequest(
-		`include "list"; list`,
-		[]string{"$kind"},
-		strings.TrimRight(category, "s"),
-	)
-	// Get result
-	output, err = req.Result(input)
+	category = strings.TrimRight(category, "s")
+	var list []string
+	if viper.IsSet("from") {
+		list, err = contentCache.ListFrom(category, viper.GetString("from"))
+	} else {
+		list, err = contentCache.List(category)
+	}
+	sort.Strings(list)
+	output = append(output, fmt.Sprintf("%s\tcontent", category))
+	output = append(output, list...)
 	return
 }
 
 // Run and show commands
-
-// func findAllPaths(command string) ([]string, error) {
-//   return CmdLine{"sh", "-c", fmt.Sprintf("which -a %s", command)}.Output()
-// }
 
 func findExecutable(file string) error {
 	d, err := os.Stat(file)
@@ -249,8 +250,7 @@ func lookAll(file string) (result []string, err error) {
 	}
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
-			// Unix shell semantics: path element "" means "."
-			dir = "."
+			dir = "." // Unix shell semantics: path element "" means "."
 		}
 		path := filepath.Join(dir, file)
 		if e := findExecutable(path); e == nil {
@@ -289,59 +289,49 @@ func findValidPath(command string) (valid string, err error) {
 
 // Show
 
-func prepareRunJob(shell string, args []string, output chan<- ProcJob, wgmain *sync.WaitGroup) {
+func getRunJob(shell string, args []string, output chan<- *ProcJob, wgmain *sync.WaitGroup) (err error) {
 	defer wgmain.Done()
-	// Check command path
+	// check command path
 	command, err := findValidPath(args[0])
 	if err != nil {
 		return
 	}
-	// get cache content, once for both go routines
-	cacheContent, err = ReadCache()
+	contentCache, err = ReadFile() // get cache content, once for all goroutines
 	fatal(wrap(err))
 	// prepare channels
-	requests := make(chan CStringMap, 2)
-	inputs := make(chan CStringMap, 2)
-	entries := make(chan CStringMap, 2)
-	// spin up workers and use a sync.WaitGroup to indicate completion
-	var wg sync.WaitGroup
-	var script string
-	// get commands
-	wg.Add(1)
-	// go prepareLaunch(entries, output, &wg)
+	inputs := make(chan *RunInput)
+	jobs := make(chan *ProcJob)
+	// spin up workers
+	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg.Add(1) // get commands
 	go func() {
 		defer wg.Done()
-		for obj := range entries {
-			job := NewProcJob(&obj)
-			nonfatal(job.PrepareLaunch())
-			output <- *job
-		}
+		job := <-jobs
+		nonfatal(job.PrepareLaunch())
+		// send result
+		output <- job
 		close(output)
 	}()
-	// get entries
-	wg.Add(1)
-	script = `include "common"; get_entries`
-	go NewCacheRequest(script, []string{}).GetMapFromMap(inputs, entries, &wg)
-	// format input
-	wg.Add(1)
-	script = `{ "request": ., "entries": { "cred": [] }, "commands": [] }`
-	go NewRequest(script, []string{}).GetMapFromMap(requests, inputs, &wg)
-	// send input
-	input := NewRunInput(shell, command)
-	requests <- input.GetStringMap()
-	close(requests)
-	// wait on the workers to finish
-	wg.Wait()
+	wg.Add(1) // get entries
+	go func () {
+		defer wg.Done()
+		input := <-inputs
+		preset, _ := contentCache.GetRunPreset(input) // build job
+		jobs <- &ProcJob{Request: *input, Entries: preset.StringMap()}
+		close(jobs)
+	}()
+	inputs <- NewRunInput(shell, command) // send input
+	close(inputs)
+	wg.Wait() // wait on the workers to finish
 	return
 }
 
 func showCommand(shell string, args []string) (result []string, err error) {
 	// prepare channels
-	jobs := make(chan ProcJob, 2)
-	// spin up workers and use a sync.WaitGroup to indicate completion
-	var wg sync.WaitGroup
-	// get result
-	wg.Add(1)
+	jobs := make(chan *ProcJob, 2)
+	// spin up workers
+	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg.Add(1) // get result
 	result = append(result, `#!`+ shell)
 	go func () {
 		defer wg.Done()
@@ -351,19 +341,16 @@ func showCommand(shell string, args []string) (result []string, err error) {
 			result = append(result, lines...)
 		}
 	}()
-	// get commands
-	wg.Add(1)
-	go prepareRunJob(shell, args, jobs, &wg)
-	// wait on the workers to finish
-	wg.Wait()
+	wg.Add(1) // get commands
+	go getRunJob(shell, args, jobs, &wg)
+	wg.Wait() // wait on the workers to finish
 	return
 }
 
 // Run
 
 func prettyJson(v interface{}) (result string) {
-	// pretty print json
-	pretty, err := json.MarshalIndent(v, "", "  ")
+	pretty, err := json.MarshalIndent(v, "", "  ") // pretty print json
 	if err != nil {
 		warn(err)
 	} else {
@@ -374,10 +361,10 @@ func prettyJson(v interface{}) (result string) {
 
 func doFork() (err error) {
 	// usage
-	// err = doFork()
-	// fatal(err)
-	// // now, we are child
-	// pid = os.Getpid()
+	//		err = doFork()
+	// 		fatal(err)
+	// 		// now, we are child
+	// 		pid = os.Getpid()
 	ret, _, errNo := unix.RawSyscall(unix.SYS_FORK, 0, 0, 0)
 	if errNo != 0 {
 		err = fmt.Errorf("%w: fork failed err: %d", ErrFailure, errNo)
@@ -387,8 +374,7 @@ func doFork() (err error) {
 	case 0:
 		break
 	default:
-		// parent
-		os.Exit(0)
+		os.Exit(0) // parent
 	}
 	// now, we are child
 	sid, err := unix.Setsid()
@@ -401,11 +387,10 @@ func doFork() (err error) {
 
 func runCommand(tag string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	// prepare channels
-	jobs := make(chan ProcJob, 2)
-	// spin up workers and use a sync.WaitGroup to indicate completion
-	var wg sync.WaitGroup
-	// get result
-	wg.Add(1)
+	jobs := make(chan *ProcJob, 2)
+	// spin up workers
+	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg.Add(1) // run commands
 	go func () {
 		defer wg.Done()
 		for job := range jobs {
@@ -414,76 +399,180 @@ func runCommand(tag string, args []string, stdin io.Reader, stdout, stderr io.Wr
 			}
 		}
 	}()
-	// get commands
-	wg.Add(1)
-	go prepareRunJob("/bin/sh", args, jobs, &wg)
-	// wait on the workers to finish
-	wg.Wait()
+	wg.Add(1) // get commands
+	go getRunJob("/bin/sh", args, jobs, &wg)
+	wg.Wait() // wait on the workers to finish
 	return nil
 }
 
 // Manage command
 
-func prepareAdjust(input <-chan CStringMap, output chan<- ProcGroupJob, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for obj := range input {
-		job := NewProcGroupJob(&obj)
-		nonfatal(job.PrepareAdjust())
-		output <- *job
+func buildProcGroupJob(input <-chan []*ProcMap, output chan<- *ProcGroupJob, wgmain *sync.WaitGroup) (err error) {
+	defer wgmain.Done()
+	for procmaps := range input {
+		// split input per Pgrp
+		byPgrp := make(map[int][]*ProcMap)
+		for _, procmap := range procmaps {
+			byPgrp[procmap.Pgrp] = append(byPgrp[procmap.Pgrp], procmap)
+		}
+		// build ProcGroupJob
+		var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+		for pgrp, procmaps := range byPgrp { // spin up workers
+			wg.Add(1)
+			go func(pgrp int, procmaps []*ProcMap) {
+				defer wg.Done()
+				jobs := ProcMapToProcJob(procmaps)
+				groupjob, _ := GroupProcJobs(jobs)
+				_ = ReviewGroupJobDiff(groupjob)
+				if viper.GetBool("debug") && viper.GetBool("verbose") {
+					for k, v := range map[string]Preset {
+						"preset": Preset(groupjob.Procs[0].Entries),
+						"diff": Preset(groupjob.Diff),
+					} {
+						doVerbose("", fmt.Sprintf(
+							"%s %s: %v\n", groupjob.LeaderInfo(), k, v,
+						))
+					}
+				}
+				if pgrp != groupjob.Pgrp {
+					warn(fmt.Errorf("%w: wrong pgrp: %d", ErrInvalid, groupjob.Pgrp))
+				}
+				if len(groupjob.Diff) > 0 {
+					output <- groupjob
+				}
+			}(pgrp, procmaps)
+		}
+		wg.Wait() // wait on the workers to finish
 	}
 	close(output)
+	return
 }
 
-func manageCommand(tag string, filter process.Filter, stdout, stderr io.Writer) (err error) {
-	// get cache content, once for both go routines
-	cacheContent, err = ReadCache()
+func getAdjustJob(input <-chan []*Proc, output chan<- *ProcGroupJob, wgmain *sync.WaitGroup) (err error) {
+	defer wgmain.Done()
+	contentCache, err = ReadFile() // get cache content, once for all goroutines
 	fatal(wrap(err))
 	// prepare channels
-	runjobs := make(chan ProcGroupJob, 8)
-	jobs := make(chan CStringMap, 8)
-	maps := make(chan CSlice, 8)
-	inputs := make(chan CSlice, 8)
-	// spin up workers and use a sync.WaitGroup to indicate completion
-	var wg sync.WaitGroup
-	count := runtime.GOMAXPROCS(0)
-	// running jobs
-	for i := 0; i < count; i++ {
-		wg.Add(1)
-		go func(input <-chan ProcGroupJob, wg *sync.WaitGroup, tag string, stdout, stderr io.Writer) {
-			defer wg.Done()
-			for job := range input {
-				job.Run(tag, stdout, stderr)
+	jobs := make(chan *ProcGroupJob, 8)
+	procmaps := make(chan []*ProcMap, 8)
+	// spin up workers
+	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg.Add(1) // prepare process group jobs
+	go func() {
+		defer wg.Done()
+		for groupjob := range jobs {
+			nonfatal(groupjob.PrepareAdjust())
+			output <- groupjob
+		}
+		close(output)
+	}()
+	wg.Add(1) // filter process group jobs
+	go buildProcGroupJob(procmaps, jobs, &wg)
+	wg.Add(1) // preparing input
+	// use []*Proc from FilteredProcs(filter) to produce ProcMap input only
+	// when relevant to existing content cache.
+	go func() {
+		defer wg.Done()
+		for procs := range input {
+			var addresses []*ProcMap
+			for _, p := range procs {
+				name := strings.Split(p.Comm, `:`)[0]
+				if contentCache.HasPreset("rule", name) {
+					addresses = append(addresses, NewProcMap(p))
+				}
 			}
-		}(runjobs, &wg, tag, stdout, stderr)
-	}
-	// prepare process group jobs
-	wg.Add(1)
-	go prepareAdjust(jobs, runjobs, &wg)
-	// filter process group jobs
-	wg.Add(1)
-	go NewCacheRequest(
-		`include "manage"; get_process_group_job`,
-		[]string{"$nproc", "$max_nice", "$uid", "$shell"},
-		numCPU(),
-		int(rlimitNice().Max),
-		viper.GetInt("UID"),
-		"/bin/sh",
-	).GetMapFromSlice(maps, jobs, &wg)
-	// preparing input
-	wg.Add(1)
-	go NewCacheRequest(
-		`include "common"; .[] | select(.comm | within(rule_names))`,
-		[]string{},
-	).GetSliceFromSlice(inputs, maps, &wg)
-	inputs <- NewManageInput(filter).GetSlice()
-	close(inputs)
-	// wait on the workers to finish
-	wg.Wait()
-	return err
+			procmaps <- addresses
+		}
+		close(procmaps)
+	}()
+	wg.Wait() // wait on the workers to finish
+	return
 }
 
-func getManageInput(filter process.Filter) CSlice {
-	return NewManageInput(filter).GetSlice()
+func sendAdjustInput(filter Filterer, output chan<- []*Proc, wgmain *sync.WaitGroup) (err error) {
+	defer wgmain.Done()
+	// send slice once
+	output <- FilteredProcs(filter)
+	if viper.GetBool("monitor") {
+		// then, if required, send more forever, till cancel or interrupt
+		ctx := context.Background()
+		ctx, cancel := context.WithCancel(ctx)
+		signalChan := make(chan os.Signal, 1)
+		signal.Notify(signalChan, os.Interrupt, unix.SIGHUP)
+		defer func() {
+			signal.Stop(signalChan)
+			cancel()
+		}()
+		// TODO: check if two infinite loops are required
+		go func() {
+			for {
+				select {
+					case s := <-signalChan:
+						switch s {
+							case unix.SIGHUP:
+								// TODO: Reload cache here
+								if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+									doVerbose("monitor", "Reloading cache...")
+								}
+							case os.Interrupt:
+								cancel()
+								os.Exit(1)
+						}
+					case <-ctx.Done():
+						doVerbose("monitor", "Done.")
+						os.Exit(0)
+				}
+			}
+		}()
+		for {
+			select {
+				case <-ctx.Done():
+					close(output)
+					return
+				case <-time.Tick(viper.GetDuration("tick")):
+					output <- FilteredProcs(filter)
+			}
+		}
+	}
+	close(output)
+	return
+}
+
+func adjustCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err error) {
+	// prepare channels
+	runjobs := make(chan *ProcGroupJob, 8)
+	procs := make(chan []*Proc, 8)
+	// spin up workers
+	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	count := runtime.GOMAXPROCS(0) + 1
+	for i := 0; i < count; i++ {
+		wg.Add(1) // run jobs
+		go func() {
+			defer wg.Done()
+			for job := range runjobs {
+				job.Run(tag, stdout, stderr)
+			}
+		}()
+	}
+	wg.Add(1) // get jobs
+	go getAdjustJob(procs, runjobs, &wg)
+	// send input
+	if viper.GetBool("verbose") {
+		action := "Managing"
+		if viper.GetBool("monitor") {
+			action = "Monitoring"
+		}
+		fmt.Fprintf(stderr, "%s %v...\n", action, filter)
+	}
+	if !(viper.GetBool("monitor")) {
+		procs <- FilteredProcs(filter)
+		close(procs)
+	} else {
+		wg.Add(1)
+		go sendAdjustInput(filter, procs, &wg)
+	}
+	wg.Wait() // wait on the workers to finish
+	return
 }
 
 // TODO: Install command

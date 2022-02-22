@@ -22,7 +22,7 @@ import (
 	"os/exec"
 	"errors"
 	"encoding/json"
-	"github.com/canalguada/nicy/jq"
+	// "github.com/canalguada/nicy/jq"
 )
 
 // Error codes
@@ -35,8 +35,8 @@ const (
 	EACCESS = 5
 	EINVAL = 6
 	EALREADY = 16
-	EUSAGE = 66
-	ECOMPILE = 67
+	// EUSAGE = 66
+	// ECOMPILE = 67
 	EPERM = 126
 	ENOTFOUND = 127
 )
@@ -61,8 +61,8 @@ var (
 	ErrAlready = customError{"already running", EALREADY}
 	ErrPermission = customError{"permission denied", EPERM}
 	ErrNotFound = customError{"not found", ENOTFOUND}
-	ErrUsage = customError{"gojq usage", EUSAGE}
-	ErrCompile = customError{"gojq compile", ECOMPILE}
+	// ErrUsage = customError{"gojq usage", EUSAGE}
+	// ErrCompile = customError{"gojq compile", ECOMPILE}
 )
 
 // fatal prints the error message and exits with proper error code.
@@ -97,10 +97,10 @@ func wrap(e error) error {
 		return e
 	}
 	switch {
-	case errors.Is(e, jq.ErrUsage):
-		return fmt.Errorf("%w", ErrUsage)
-	case errors.Is(e, jq.ErrCompile):
-		return fmt.Errorf("%w", ErrCompile)
+	// case errors.Is(e, jq.ErrUsage):
+	//   return fmt.Errorf("%w", ErrUsage)
+	// case errors.Is(e, jq.ErrCompile):
+	//   return fmt.Errorf("%w", ErrCompile)
 	case errors.Is(e, os.ErrInvalid):
 		return fmt.Errorf("%w: %v", ErrInvalid, e)
 	case errors.Is(e, os.ErrPermission):

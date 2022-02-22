@@ -4,12 +4,11 @@ package		= nicy
 program		= nicy
 git_branch	= master
 version		= 0.1.6
-revision	= 3
+revision	= 4
 release_dir	= build
 prefix		= /usr/local
 bindir		= $(prefix)/bin
 confdir		= $(prefix)/etc/$(program)
-libdir		= $(prefix)/lib/$(program)
 
 SUDO		= $$([ $$UID -ne 0 ] && echo "sudo")
 
@@ -75,16 +74,6 @@ install-man: man
 	install -d $(DESTDIR)$(prefix)/share/man/man1
 	install -m644 man/$(program).1.gz $(DESTDIR)$(prefix)/share/man/man1/
 
-.PHONY: install-lib
-install-lib:
-	install -d $(DESTDIR)$(libdir)/jq
-	install -m644 lib/jq/common.jq $(DESTDIR)$(libdir)/jq/
-	install -m644 lib/jq/install.jq $(DESTDIR)$(libdir)/jq/
-	install -m644 lib/jq/list.jq $(DESTDIR)$(libdir)/jq/
-	install -m644 lib/jq/manage.jq $(DESTDIR)$(libdir)/jq/
-	install -m644 lib/jq/rebuild.jq $(DESTDIR)$(libdir)/jq/
-	install -m644 lib/jq/run.jq $(DESTDIR)$(libdir)/jq/
-
 .PHONY: install-conf
 install-conf:
 	install -d $(DESTDIR)$(confdir)/rules.d
@@ -95,7 +84,7 @@ install-conf:
 
 
 .PHONY: install
-install: install-bin install-man install-lib install-conf
+install: install-bin install-man install-conf
 
 .PHONY: uninstall-bin
 uninstall-bin:
@@ -104,10 +93,6 @@ uninstall-bin:
 .PHONY: uninstall-man
 uninstall-man:
 	rm -f $(DESTDIR)$(prefix)/share/man/man1/$(program).1.gz
-
-.PHONY: uninstall-lib
-uninstall-lib:
-	rm -rf $(DESTDIR)$(libdir)
 
 .PHONY: uninstall-conf
 uninstall-conf:
@@ -119,5 +104,5 @@ uninstall-conf:
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(confdir)
 
 .PHONY: uninstall
-uninstall: uninstall-bin uninstall-man uninstall-lib uninstall-conf
+uninstall: uninstall-bin uninstall-man uninstall-conf
 

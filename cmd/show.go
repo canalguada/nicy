@@ -17,9 +17,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	// "fmt"
 	"os"
-	// "strings"
 	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -32,7 +30,14 @@ var showCmd = &cobra.Command{
 	Short: "Show effective script for given command",
 	Long: `Show the effective script for the given COMMAND
 
-The PRESET argument can be: 'auto' to use some specific rule for the command, if available; 'cgroup-only' to use only the cgroup properties of that rule, if any; 'default' to use this special fallback preset; or any other generic type. The CGROUP argument can be a cgroup defined in configuration files. The QUOTA argument can be an integer ranging from 1 to 99 that represents a percentage relative to the total CPU time available on all cores.`,
+The PRESET argument can be:
+- 'auto' to use some specific rule for the command, if available;
+- 'cgroup-only' to use only the cgroup properties of that rule, if any;
+- 'default' to use this special fallback preset;
+-  any other generic type.
+The CGROUP argument can be a cgroup defined in configuration files.
+The QUOTA argument can be an integer ranging from 1 to 99.
+It represents a percentage of the whole CPU time available, on all cores.`,
 	Args: cobra.MinimumNArgs(1),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {

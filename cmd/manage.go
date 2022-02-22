@@ -17,12 +17,8 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	// "fmt"
-	// "os"
-	// "strings"
-	// "encoding/json"
-	"github.com/canalguada/nicy/process"
-	// "github.com/canalguada/nicy/jq"
+	"fmt"
+	"time"
 	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -30,21 +26,27 @@ import (
 
 // manageCmd represents the manage command
 var manageCmd = &cobra.Command{
-	Use:   "manage [-n] [-u|-g|-s|-a]",
+	Use:   "manage [-n] [-u|-g|-s|-a] [-m [-t SECONDS]]",
 	Short: "Manage running processes",
-	Long: `Manage the running processes, applying presets
+	Long: `Manage once, or repeatedly, the running processes, applying rules, if any
 
-The processes are managed per process group, when a specific rule is available for the process group leader. The --system, --global and --all options require root credentials.`,
+The processes are selected when their group leader matches an existing rule.
+The --user option is the implied default, when none is given.
+Only superuser can fully run manage command with --system, --global or --all option.`,
 	Args: cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		slice := []string{"user", "global", "system", "all"}
 		fs := cmd.LocalNonPersistentFlags()
-		if err := checkConsistency(fs, slice); err != nil {
+		if err := checkConsistency(fs, cfgMap["scopes"]); err != nil {
 			return err
 		}
+		names := append(cfgMap["scopes"], "dry-run", "monitor", "tick")
 		// Bind shared flags
-		bindFlags(cmd, "user", "global", "system", "all", "dry-run")
+		bindFlags(cmd, names...)
+		if tick := viper.GetDuration("tick"); tick.Seconds() < 5 || tick.Seconds() > 3600 {
+			msg := fmt.Sprintf("must range from 5s to 1h, got %v", tick)
+			return fmt.Errorf("%w: %s", ErrParse, msg)
+		}
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -52,28 +54,9 @@ The processes are managed per process group, when a specific rule is available f
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		var filter process.Filter
-		var message string
-		switch {
-		case viper.GetBool("user"):
-			filter = process.GetFilter("user")
-			message = "calling user processes"
-		case viper.GetBool("global"):
-			filter = process.GetFilter("global")
-			message = "processes inside any user slice"
-		case viper.GetBool("system"):
-			filter = process.GetFilter("system")
-			message = "processes inside system slice"
-		case viper.GetBool("all"):
-			filter = process.GetFilter("all")
-			message = "all processes"
-		default:
-			filter = process.GetFilter("user")
-			message = "calling user processes"
-		}
-		// Get result
-		if viper.GetBool("verbose") {
-			cmd.PrintErrln("Managing", message + "...")
+		var scope = "user"
+		if value, ok := firstTrue(cfgMap["scopes"]); ok {
+			scope = value
 		}
 		if err := setCapabilities(true); err != nil {
 			cmd.PrintErrln(err)
@@ -83,8 +66,13 @@ The processes are managed per process group, when a specific rule is available f
 				cmd.PrintErrln(err)
 			}
 		}()
-		err := manageCommand("", filter, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		err := adjustCommand( // was manageCommand
+			"",
+			GetFilterer(scope),
+			cmd.OutOrStdout(), cmd.ErrOrStderr(),
+		)
 		fatal(wrap(err))
+		// TODO: suppress after full debug
 		// cmd.Println(prettyJson(getManageInput(filter)))
 	},
 }
@@ -106,6 +94,8 @@ func init() {
 
 	addDumpManageFlags(manageCmd)
 	addDryRunFlag(manageCmd)
+	fs.BoolP("monitor", "m", false, "run continuously")
+	fs.DurationP("tick", "t", 5 * time.Second, "delay between consecutive runs in seconds")
 
 	manageCmd.InheritedFlags().SortFlags = false
 }

@@ -40,9 +40,30 @@ const (
 )
 
 var (
-	cfgFile string
 	logger = log.New(os.Stderr, prog + ": ", 0)
+	cfgFile string // user configuration file
+	cfgMap map[string][]string // some hard coded configuration
+	contentCache Cache // content cache
 )
+
+func init() {
+	cfgMap = make(map[string][]string)
+	cfgMap["category"] = []string{"rule", "type", "cgroup"}
+	cfgMap["systemd"] = []string{
+		"CPUQuota", "IOWeight", "MemoryHigh", "MemoryMax",
+	}
+	cfgMap["cgroup"] = append([]string{"cgroup"}, cfgMap["systemd"]...)
+	cfgMap["resource"] = []string{
+		"nice", "sched", "rtprio", "ioclass", "ionice", "oom_score_adj",
+	}
+	cfgMap["type"] = append([]string{"type"}, cfgMap["resource"]...)
+	cfgMap["type"] = append(cfgMap["type"], cfgMap["cgroup"]...)
+	cfgMap["rule"] = append([]string{"name"}, cfgMap["type"]...)
+	cfgMap["rule"] = append(cfgMap["rule"], "cmdargs", "env")
+	cfgMap["cgroup-only"] = append(cfgMap["cgroup"], "name", "cmdargs", "env")
+	cfgMap["formats"] = []string{"json", "raw", "values"}
+	cfgMap["scopes"] = []string{"user", "global", "system", "all"}
+}
 
 func debug(v ...interface{}) {
 	if viper.GetBool("debug") {
@@ -62,9 +83,19 @@ func inform(v ...interface{}) {
 	logger.Println(v...)
 }
 
+// var (
+//   get = viper.Get
+//   getBool = viper.GetBool
+//   getString = viper.GetString
+//   getInt = viper.GetInt
+//   getStringSlice = viper.GetStringSlice
+//   set = viper.Set
+//   setDefault = viper.SetDefault
+// )
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   prog,
+	Use:   fmt.Sprintf("%s [command [arguments]]", prog),
 	Short: "Set the execution environment and configure the resources that spawned and running processes are allowed to share",
 	Long: `nicy can be used to ease the control upon the execution environment of the managed
 processes and to configure the available resources, applying them generic or
@@ -154,11 +185,8 @@ func init() {
 	// when this action is called directly.
 	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	rootCmd.Flags().SortFlags = false
-}
 
-// Commands
-
-func init() {
+	// Commands
 	cobra.EnableCommandSorting = false
 
 	rootCmd.AddCommand(buildCmd)
@@ -169,6 +197,8 @@ func init() {
 	rootCmd.AddCommand(manageCmd)
 	rootCmd.AddCommand(installCmd)
 }
+
+// Functions
 
 func exists(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -241,8 +271,8 @@ func initConfig() {
 		// Set cachedir
 		viper.SetDefault("cachedir", filepath.Join("/var/cache", prog))
 	}
-	// Set cgroups, types, rules and database paths
-	for _, name := range []string{"cgroups", "types", "rules", "database"} {
+	// Set cgroups, types, rules and cache paths
+	for _, name := range []string{"cgroups", "types", "rules", "cache"} {
 		viper.SetDefault(name, filepath.Join(viper.GetString("cachedir"), name))
 	}
 	// Set XDG_RUNTIME_DIR and runtimedir
@@ -271,6 +301,10 @@ func initConfig() {
 		path = filepath.Join("/usr/local/bin", prog)
 	}
 	viper.SetDefault("scripts", path)
+	// System utilities require capabilities.
+	// Use sudo only when not available.
+	viper.SetDefault("sudo", "sudo")
+	// Use kernel.org/pub/linux/libs/security/libcap/cap
 	// Main default values
 	viper.SetDefault("confdirs", configPaths)
 	libdir := filepath.Join("/usr/lib", prog)
@@ -290,13 +324,13 @@ func initConfig() {
 	// Then merge config file that user set with the flag
 	if cfgFile != "" {
 		if err = mergeConfigFile(cfgFile); err != nil {
-			debug(err)
+			fatal(err)
 		}
 	}
 	// Allow use of environment variables
 	viper.SetEnvPrefix(prog)
 	viper.AutomaticEnv() // read in environment variables that match
-	// Provide SUDO environment variable to jq scripts.
+	// Provide SUDO environment variable.
 	os.Setenv("SUDO", viper.GetString("sudo"))
 	// Debug
 	// Display the capabilities of the running process
@@ -305,15 +339,6 @@ func initConfig() {
 		debug("config file:", viper.ConfigFileUsed())
 	}
 	viper.WriteConfigAs(filepath.Join(viper.GetString("runtimedir"), "viper.yaml"))
-}
-
-// Various
-
-func init() {
-	// System utilities require CAP_SYS_NICE.
-	// Use sudo only when this capability is not set.
-	viper.SetDefault("sudo", "sudo")
-	// Use kernel.org/pub/linux/libs/security/libcap/cap
 }
 
 // More functions
@@ -325,13 +350,6 @@ func getTabWriter(output io.Writer) *tabwriter.Writer {
 
 func debugOutput(cmd *cobra.Command) {
 	if viper.GetBool("debug") {
-		// tw := getTabWriter(cmd.ErrOrStderr())
-		// tw.Write([]byte(fmt.Sprintf("command:\t%#v\n", cmd.Name())))
-		// tw.Write([]byte("key:\tvalue\n"))
-		// for _, k := range viper.AllKeys() {
-		//   tw.Write([]byte(fmt.Sprintf("%s:\t%#v\n", k, viper.Get(k))))
-		// }
-		// tw.Flush()
 		config := viper.AllSettings()
 		config["command"] = cmd.Name()
 		data, err := json.Marshal(config)
@@ -343,12 +361,23 @@ func debugOutput(cmd *cobra.Command) {
 	}
 }
 
+func firstTrue(names []string) (result string, ok bool) {
+	for _, name := range names {
+		if viper.GetBool(name) {
+			result = name
+			ok = true
+			break
+		}
+	}
+	return
+}
+
 // checkConsistency returns an error if two or more mutually exclusive flags
 // have be been set.
 func checkConsistency(fs *flag.FlagSet, flagNames []string) error {
 	var msg string
 	count := 0
-	changed := make([]string, 0)
+	var changed []string
 	for _, name := range flagNames {
 		if fs.Changed(name) {
 			count++
@@ -364,7 +393,7 @@ func checkConsistency(fs *flag.FlagSet, flagNames []string) error {
 		last := len(changed) - 1
 		msg = strings.Join(
 			func(names []string) []string {
-				result := make([]string, 0)
+				var result []string
 				for _, name := range names {
 					result = append(result, "--" + name)
 				}

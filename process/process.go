@@ -3,24 +3,33 @@ package process
 
 import (
 	"fmt"
+	"log"
 	"encoding/json"
 	"strconv"
 	"strings"
+	// "bytes"
 	"sort"
 	"os"
 	"os/user"
 	"path/filepath"
 	"io/ioutil"
+	"regexp"
 	"sync"
 	"runtime"
 	"unsafe"
 	"golang.org/x/sys/unix"
 )
 
-func panicIfError(e error) {
-	if e != nil {
-		panic(e)
-	}
+var (
+	reStat *regexp.Regexp
+)
+
+func init() {
+	reStat = regexp.MustCompile(`(?m)^(?P<pid>\d+) \((?P<comm>.+)\) (?P<fields>.*)$`)
+}
+
+func GetResource(pid int, rc string) ([]byte, error) {
+	return ioutil.ReadFile(fmt.Sprintf("/proc/%d/%s", pid, rc))
 }
 
 func GetUid(pid int) int {
@@ -31,21 +40,19 @@ func GetUid(pid int) int {
 	return -1
 }
 
-func GetUser(pid int) (*user.User, error) {
-	return user.LookupId(strconv.Itoa(GetUid(pid)))
+func GetUser(uid int) (*user.User, error) {
+	return user.LookupId(strconv.Itoa(uid))
 }
 
 func GetCgroup(pid int) (cgroup string, err error) {
-	data, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
-	if err == nil {
+	if data, err := GetResource(pid, "cgroup"); err == nil {
 		cgroup = strings.TrimSpace(string(data))
 	}
 	return
 }
 
 func GetOomScoreAdj(pid int) (score int, err error) {
-	data, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/oom_score_adj", pid))
-	if err == nil {
+	if data, err := GetResource(pid, "oom_score_adj"); err == nil {
 		return strconv.Atoi(strings.TrimSpace(string(data)))
 	}
 	return
@@ -145,9 +152,7 @@ type Sched_Param struct {
 }
 
 func Sched_GetScheduler(pid int) (int, error) {
-	class, _, err := unix.Syscall(
-		unix.SYS_SCHED_GETSCHEDULER, uintptr(pid), 0, 0,
-	)
+	class, _, err := unix.Syscall(unix.SYS_SCHED_GETSCHEDULER, uintptr(pid), 0, 0)
 	if err == 0 {
 		return int(class), nil
 	}
@@ -165,115 +170,122 @@ func Sched_GetParam(pid int) (int, error) {
 	return -1, err
 }
 
-type Proc struct {
-	Pid int					`json:"pid"`
-	Ppid int				`json:"ppid"`
-	Pgrp int				`json:"pgrp"`
-	Uid int					`json:"uid"`
-	User string			`json:"user"`
-	State string		`json:"state"`
-	Comm string			`json:"comm"`
-	Cgroup string		`json:"cgroup"`
-	Priority int		`json:"priority"`
-	Nice int				`json:"nice"`
-	NumThreads int	`json:"num_threads"`
-	RTPrio int			`json:"rtprio"`
-	Policy int			`json:"policy"`
-	OomScoreAdj int	`json:"oom_score_adj"`
-	IOPrioClass int	`json:"ioprio_class"`
-	IOPrioData int	`json:"ionice"`
+type ProcStat struct {
+	stat string
+	Pid int					`json:"pid"`						// (1) %d
+	Comm string			`json:"comm"`						// (2) %s
+	State string		`json:"state"`					// (3) %s
+	Ppid int				`json:"ppid"`						// (4) %d
+	Pgrp int				`json:"pgrp"`						// (5) %d
+	Priority int		`json:"priority"`				// (18) %d
+	Nice int				`json:"nice"`						// (19) %d
+	NumThreads int	`json:"num_threads"`		// (20) %d
+	RTPrio int			`json:"rtprio"`					// (40) %d
+	Policy int			`json:"policy"`					// (41) %d
 }
 
-func parseInt(s string) int {
-	v, err := strconv.Atoi(strings.TrimSpace(s))
-	panicIfError(err)
-	return v
-}
-
-func (p *Proc) setUser() (err error) {
-	owner, err := GetUser(p.Pid)
-	if err != nil {
-		return
+func (stat *ProcStat) parseFields(submatch string) (err error) {
+	var (
+		nums = [...]int{0, 1, 2, 15, 16, 17, 37, 38}
+		input []string
+	)
+	s := strings.Fields(submatch)
+	for _, pos := range nums {
+		input = append(input, s[pos])
 	}
-	p.Uid = parseInt(owner.Uid)
-	p.User = owner.Username
-	return
-}
-
-func (p *Proc) setCgroup() (err error) {
-	cgroup, err := GetCgroup(p.Pid)
-	if err != nil {
-		return
-	}
-	p.Cgroup = cgroup
-	return
-}
-
-func (p *Proc) setOomScoreAdj() (err error) {
-	scoreadj, err := GetOomScoreAdj(p.Pid)
-	if err != nil {
-		return
-	}
-	p.OomScoreAdj = scoreadj
-	return
-}
-
-func (p *Proc) setIOPrio() (err error) {
-	ioprio, err := IOPrio_Get(p.Pid)
-	if err != nil {
-		return
-	}
-	IOPrio_Split(ioprio, &p.IOPrioClass, &p.IOPrioData)
-	return
-}
-
-func (p *Proc) ReadStat(stat string) (err error) {
-	s := strings.Fields(stat)
-	if !(strings.HasPrefix(s[1], "(")) || !(strings.HasSuffix(s[1], ")")) {
-		return fmt.Errorf("invalid format, cannot extract comm value")
-	}
-	p.Comm = strings.Trim(s[1], "()")
-	p.State = s[2]
 	_, err = fmt.Sscanf(
-		strings.Join(
-			[]string{s[0], s[3], s[4], s[17], s[18], s[19], s[39], s[40]},
-			" ",
-		),
-		"%d %d %d %d %d %d %d %d",
-		&p.Pid,
-		&p.Ppid,
-		&p.Pgrp,
-		&p.Priority,
-		&p.Nice,
-		&p.NumThreads,
-		&p.RTPrio,
-		&p.Policy,
+		strings.Join(input, ` `),
+		"%s %d %d %d %d %d %d %d",
+		&stat.State,
+		&stat.Ppid,
+		&stat.Pgrp,
+		&stat.Priority,
+		&stat.Nice,
+		&stat.NumThreads,
+		&stat.RTPrio,
+		&stat.Policy,
 	)
 	return
 }
 
-func (p *Proc) LoadStat() (err error) {
-	if p.Pid == 0 {
-		return fmt.Errorf("pid required")
-	}
-	data, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/stat", p.Pid))
-	if err == nil {
-		err = p.ReadStat(string(data))
+func (stat *ProcStat) Load(buffer string) (err error) {
+	stat.stat = buffer
+	// parse
+	matches := reStat.FindStringSubmatch(buffer)
+	// check pid value
+	if value, err := strconv.Atoi(matches[1]); err == nil {
+		stat.Pid = value
+		stat.Comm = matches[2]
+		err = stat.parseFields(matches[3])
 	}
 	return
 }
 
+func (stat *ProcStat) Read(pid int) (err error) {
+	// read stat data for pid
+	if data, err := GetResource(pid, "stat"); err == nil {
+		// load
+		err = stat.Load(string(data))
+	}
+	return
+}
+
+type Proc struct {
+	ProcStat
+	Uid int						`json:"uid"`
+	owner *user.User	`json:"-"`
+	Cgroup [3]string	`json:"cgroup"`
+	OomScoreAdj int		`json:"oom_score_adj"`
+	IOPrioClass int		`json:"ioprio_class"`
+	IOPrioData int		`json:"ionice"`
+}
+
+func (p *Proc) setUser() (err error) {
+	p.Uid = GetUid(p.Pid)
+	if owner, err := GetUser(p.Uid); err == nil {
+		p.owner = owner
+	}
+	return
+}
+
+func (p *Proc) setCgroup() (err error) {
+	if cgroup, err := GetCgroup(p.Pid); err == nil {
+		parts := strings.Split(cgroup, `/`)
+		p.Cgroup = [3]string{cgroup, parts[1], parts[len(parts) - 1]}
+	}
+	return
+}
+
+func (p *Proc) setOomScoreAdj() (err error) {
+	if scoreadj, err := GetOomScoreAdj(p.Pid); err == nil {
+		p.OomScoreAdj = scoreadj
+	}
+	return
+}
+
+func (p *Proc) setIOPrio() (err error) {
+	if ioprio, err := IOPrio_Get(p.Pid); err == nil {
+		IOPrio_Split(ioprio, &p.IOPrioClass, &p.IOPrioData)
+	}
+	return
+}
+
+type setter = func() error
+
+func (p *Proc) setters() []setter {
+	return []setter{p.setUser, p.setCgroup, p.setOomScoreAdj, p.setIOPrio}
+}
+
 func NewProc(pid int) *Proc {
-	p := &Proc{Pid: pid}
-	panicIfError(p.LoadStat())
-	// User
-	panicIfError(p.setUser())
-	// Cgroup
-	panicIfError(p.setCgroup())
-	// Oom score adjust
-	panicIfError(p.setOomScoreAdj())
-	// IO scheduling
-	panicIfError(p.setIOPrio())
+	p := &Proc{ProcStat: ProcStat{Pid: pid}}
+	if err:= p.ProcStat.Read(pid); err != nil {
+		panic(err)
+	}
+	for _, function := range p.setters() {
+		if err := function(); err != nil {
+			panic(err)
+		}
+	}
 	return p
 }
 
@@ -284,50 +296,50 @@ func GetCalling() *Proc {
 func NewProcFromStat(stat string) (p *Proc, err error) {
 	p = new(Proc)
 	// Stat
-	err = p.ReadStat(stat)
+	err = p.ProcStat.Load(stat)
 	if err != nil {
 		return
 	}
-	// User
-	err = p.setUser()
-	if err != nil {
-		return
+	for _, function := range p.setters() {
+		if err = function(); err != nil {
+			break
+		}
 	}
-	// Cgroup
-	err = p.setCgroup()
-	if err != nil {
-		return
-	}
-	// Oom score adjust
-	err = p.setOomScoreAdj()
-	if err != nil {
-		return
-	}
-	// IO scheduling
-	err = p.setIOPrio()
 	return
 }
 
+func (p *Proc) GoString() string {
+	return "Proc" + p.String()
+}
+
 func (p *Proc) String() string {
-	return fmt.Sprintf("%#v", *p)
+	return fmt.Sprintf(
+		"{Pid: %d, Comm: %q, State: %q, Ppid: %d, Pgrp: %d, Priority: %d, Nice: %d, NumThreads: %d, Uid: %d, Cgroup: [%v %v %v], RTPrio: %d, Policy: %d, OomScoreAdj: %d, IOPrioData: %d, IOPrioClass: %d}",
+		p.Pid, p.Comm, p.State, p.Ppid, p.Pgrp, p.Priority, p.Nice, p.NumThreads,
+		p.Uid, p.Cgroup[0], p.Cgroup[1], p.Cgroup[2],
+		p.RTPrio, p.Policy, p.OomScoreAdj, p.IOPrioData, p.IOPrioClass,
+	)
 }
 
-func (p *Proc) Json() string {
-	data, err := json.Marshal(*p)
-	panicIfError(err)
-	return string(data)
+func (p Proc) Json() (result string) {
+	if data, err := json.Marshal(p); err != nil {
+		panic(err)
+	} else {
+		result = string(data)
+	}
+	return
 }
 
-func (p *Proc) Raw() string {
+func (p Proc) Raw() string {
 	return fmt.Sprintf("%d %d %d %d %s %s %s %s %d %d %d %d %d %d %d %d",
 		p.Pid,
 		p.Ppid,
 		p.Pgrp,
 		p.Uid,
-		p.User,
+		p.owner.Username,
 		p.State,
 		p.Comm,
-		p.Cgroup,
+		p.Cgroup[0],
 		p.Priority,
 		p.Nice,
 		p.NumThreads,
@@ -368,38 +380,26 @@ func (p *Proc) IOSchedInfo() string {
 }
 
 func (p *Proc) Values() string {
-	parts := strings.Split(p.Cgroup, "/")
 	return fmt.Sprintf("[%d,%d,%d,%d,%q,%q,%q,%q,%q,%q,%d,%d,%d,%d,%d,%d,%q,%d]",
 		p.Pid,
 		p.Ppid,
 		p.Pgrp,
 		p.Uid,
-		p.User,
+		p.owner.Username,
 		p.State,
-		parts[1],
-		parts[len(parts) - 1],
+		p.Cgroup[1],
+		p.Cgroup[2],
 		p.Comm,
-		p.Cgroup,
+		p.Cgroup[0],
 		p.Priority,
 		p.Nice,
 		p.NumThreads,
 		p.RTPrio,
 		p.Policy,
 		p.OomScoreAdj,
-		IO.Class[p.IOPrioClass],
+		p.IOClass(),
 		p.IOPrioData,
 	)
-}
-
-func (p *Proc) RuntimeProperties() map[string]interface{} {
-	result := make(map[string]interface{})
-	result["nice"] = p.Nice
-	result["sched"] = p.Sched()
-	result["rtprio"] = p.RTPrio
-	result["ioclass"] = IO.Class[p.IOPrioClass]
-	result["ionice"] = p.IOPrioData
-	result["oom_score_adj"] = p.OomScoreAdj
-	return result
 }
 
 type MainProperties struct {
@@ -409,6 +409,15 @@ type MainProperties struct {
 	IOClass string	`json:"ioclass"`
 	IONice int			`json:"ionice"`
 	OomScoreAdj int	`json:"oom_score_adj"`
+}
+
+func (p *MainProperties) GetStringMap() (result map[string]interface{}) {
+	if data, err := json.Marshal(*p); err != nil {
+		panic(err)
+	} else if err := json.Unmarshal(data, &result); err != nil {
+		panic(err)
+	}
+	return
 }
 
 type ProcMap struct {
@@ -428,25 +437,24 @@ type ProcMap struct {
 }
 
 func NewProcMap(p *Proc) *ProcMap {
-	parts := strings.Split(p.Cgroup, "/")
 	pm := &ProcMap{
 		Pid: p.Pid,
 		Ppid: p.Ppid,
 		Pgrp: p.Pgrp,
 		Uid: p.Uid,
-		User: p.User,
+		User: p.owner.Username,
 		State: p.State,
-		Slice: parts[1],
-		Unit: parts[len(parts) - 1],
+		Slice: p.Cgroup[1],
+		Unit: p.Cgroup[2],
 		Comm: p.Comm,
-		Cgroup: p.Cgroup,
+		Cgroup: p.Cgroup[0],
 		Priority: p.Priority,
 		NumThreads: p.NumThreads,
 		Runtime: MainProperties{
 			Nice: p.Nice,
 			Sched: p.Sched(),
 			RTPrio: p.RTPrio,
-			IOClass: IO.Class[p.IOPrioClass],
+			IOClass: p.IOClass(),
 			IONice: p.IOPrioData,
 			OomScoreAdj: p.OomScoreAdj,
 		},
@@ -454,12 +462,13 @@ func NewProcMap(p *Proc) *ProcMap {
 	return pm
 }
 
-func (pm *ProcMap) GetStringMap() map[string]interface{} {
-	data, err := json.Marshal(*pm)
-	panicIfError(err)
-	result := make(map[string]interface{})
-	panicIfError(json.Unmarshal(data, &result))
-	return result
+func (pm *ProcMap) GetStringMap() (result map[string]interface{}) {
+	if data, err := json.Marshal(*pm); err != nil {
+		panic(err)
+	} else if err := json.Unmarshal(data, &result); err != nil {
+		panic(err)
+	}
+	return
 }
 
 func (p *Proc) GetStringMap() map[string]interface{} {
@@ -467,48 +476,71 @@ func (p *Proc) GetStringMap() map[string]interface{} {
 }
 
 func (p *Proc) InUserSlice() bool {
-	return strings.Contains(p.Cgroup, "/user.slice/")
+	return p.Cgroup[1] == "user.slice"
 }
 
 func (p *Proc) InSystemSlice() bool {
 	return !(p.InUserSlice())
 }
 
-func Stat(stat string) string {
-	p, err := NewProcFromStat(stat)
-	panicIfError(err)
-	return p.Values()
+func Stat(stat string) (result string) {
+	if p, err := NewProcFromStat(stat); err != nil {
+		panic(err)
+	} else {
+		result = p.Values()
+	}
+	return
 }
 
-type Filter func(p *Proc, err error) bool
+type ProcFilter struct {
+	filter func(p *Proc, err error) bool
+	message string
+}
 
-var (
-	filterUser = func(p *Proc, err error) bool {
-		return err == nil && p.Uid == os.Getuid() && p.InUserSlice()
-	}
-	filterGlobal = func(p *Proc, err error) bool {
-		return err == nil && p.InUserSlice()
-	}
-	filterSystem = func(p *Proc, err error) bool {
-		return err == nil && p.InSystemSlice()
-	}
-	filterAll = func(p *Proc, err error) bool {
-		return err == nil
-	}
-)
+func (self ProcFilter) Filter(p *Proc, err error) bool {
+	return self.filter(p, err)
+}
 
-func GetFilter(what string) Filter {
-	switch strings.ToLower(what) {
-	case "user":
-		return filterUser
+func (self ProcFilter) String() string {
+	return self.message
+}
+
+type Filterer interface {
+	Filter(p *Proc, err error) bool
+	String() string
+}
+
+func GetFilterer(scope string) ProcFilter {
+	switch strings.ToLower(scope) {
 	case "global":
-		return filterGlobal
+		return ProcFilter{
+			filter: func(p *Proc, err error) bool {
+				return err == nil && p.InUserSlice()
+			},
+			message: "processes inside any user slice",
+		}
 	case "system":
-		return filterSystem
+		return ProcFilter{
+			filter: func(p *Proc, err error) bool {
+				return err == nil && p.InSystemSlice()
+			},
+			message: "processes inside system slice",
+		}
 	case "all":
-		return filterAll
+		return ProcFilter{
+			filter: func(p *Proc, err error) bool {
+				return err == nil
+			},
+			message: "all processes",
+		}
 	}
-	return filterUser
+	// Default is user
+	return ProcFilter{
+		filter: func(p *Proc, err error) bool {
+			return err == nil && p.Uid == os.Getuid() && p.InUserSlice()
+		},
+		message: "calling user processes",
+	}
 }
 
 type Formatter func (p *Proc) string
@@ -526,52 +558,53 @@ func GetFormatter(format string) Formatter {
 	}
 }
 
-// ProcByPid implements sort.Interface for []Proc based on Pid field
-type ProcByPid []Proc
+// ProcByPid implements sort.Interface for []*Proc based on Pid field
+type ProcByPid []*Proc
 func (s ProcByPid) Len() int { return len(s) }
 func (s ProcByPid) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 func (s ProcByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
 
 // FilteredProcs returns a slice of Proc for filtered processes.
-func FilteredProcs(filter Filter) (result []Proc) {
+func FilteredProcs(filter Filterer) (result []*Proc) {
 	files, _ := filepath.Glob("/proc/[0-9]*/stat")
 	size := len(files)
-	result = make([]Proc, 0, size)
 	// make our channels for communicating work and results
 	stats := make(chan string, size)
-	procs := make(chan Proc, size)
+	procs := make(chan *Proc, size)
 	// spin up workers and use a sync.WaitGroup to indicate completion
 	var count = runtime.GOMAXPROCS(0)
 	var wg sync.WaitGroup
 	for i := 0; i < count; i++ {
 		wg.Add(1)
-		go func(stats <-chan string, procs chan<- Proc, wg *sync.WaitGroup){
+		go func(){
 			defer wg.Done()
 			var p *Proc
 			var err error
 			for stat := range stats {
 				p, err = NewProcFromStat(stat)
-				if filter(p, err) {
-					procs <- *p
+				if filter.Filter(p, err) {
+					procs <- p
 				}
 			}
-		}(stats, procs, &wg)
+		}()
 	}
-	// wait on the workers to finish and close the result channel
-	// to signal downstream that all work is done
-	go func() {
-		defer close(procs)
-		wg.Wait()
-	}()
 	// start sending jobs
+	wg.Add(1)
 	go func() {
-		defer close(stats)
+		defer wg.Done()
 		for _, file := range files {
 			data, err := ioutil.ReadFile(file)
 			if err == nil {
 				stats <- string(data)
 			}
 		}
+		close(stats)
+	}()
+	// wait on the workers to finish and close the procs channel
+	// to signal downstream that all work is done
+	go func() {
+		defer close(procs)
+		wg.Wait()
 	}()
 	// collect result from procs channel
 	for p := range procs {
@@ -582,59 +615,76 @@ func FilteredProcs(filter Filter) (result []Proc) {
 	return
 }
 
-// ProcMapByPid implements sort.Interface for []ProcMap based on Pid field
-type ProcMapByPid []ProcMap
+// ProcMapByPid implements sort.Interface for []*ProcMap based on Pid field
+type ProcMapByPid []*ProcMap
 func (s ProcMapByPid) Len() int { return len(s) }
 func (s ProcMapByPid) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 func (s ProcMapByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
 
+// ProcMapByPgrp implements sort.Interface for []*ProcMap based on Pgrp field
+type ProcMapByPgrp []*ProcMap
+func (s ProcMapByPgrp) Len() int { return len(s) }
+func (s ProcMapByPgrp) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s ProcMapByPgrp) Less(i, j int) bool { return s[i].Pgrp < s[j].Pgrp }
+
 // FilteredProcMaps returns a slice of ProcMap for filtered processes.
-func FilteredProcMaps(filter Filter) (result []ProcMap, err error) {
-	files, err := filepath.Glob("/proc/[0-9]*/stat")
-	if err != nil {
-		return
-	}
+func FilteredProcMaps(filter Filterer) (result []*ProcMap, err error) {
+	var (
+		count = runtime.GOMAXPROCS(0)
+		wg sync.WaitGroup
+	)
 	// prepare channels
 	stats := make(chan string, 8)
-	procmaps := make(chan ProcMap, 8)
+	procmaps := make(chan *ProcMap, 8)
 	// spin up workers and use a sync.WaitGroup to indicate completion
-	var count = runtime.GOMAXPROCS(0)
-	var wg sync.WaitGroup
+	// collect result
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for procmap := range procmaps {
+			result = append(result, procmap)
+		}
+	}()
 	for i := 0; i < count; i++ {
 		wg.Add(1)
-		go func(stats <-chan string, procmaps chan<- ProcMap, wg *sync.WaitGroup){
+		go func(){
 			defer wg.Done()
-			var p *Proc
-			var err error
+			var (
+				p *Proc
+				e error
+			)
 			for stat := range stats {
-				p, err = NewProcFromStat(stat)
-				if filter(p, err) {
-					procmaps <- *NewProcMap(p)
+				p, e = NewProcFromStat(stat)
+				if filter.Filter(p, e) {
+					procmaps <- NewProcMap(p)
 				}
 			}
-		}(stats, procmaps, &wg)
+		}()
 	}
 	// start sending jobs
 	wg.Add(1)
-	go func(stats chan<- string, wg *sync.WaitGroup) {
-		defer close(stats)
-		for _, file := range files {
-			data, err := ioutil.ReadFile(file)
-			if err == nil {
-				stats <- string(data)
+	go func() {
+		defer wg.Done()
+		if files, e := filepath.Glob("/proc/[0-9]*/stat"); e == nil {
+			for _, file := range files {
+				data, e := ioutil.ReadFile(file)
+				if e == nil {
+					stats <- string(data)
+				} else {
+					log.Println(e)
+				}
 			}
+		} else {
+			log.Println(e)
 		}
-	}(stats, &wg)
+		close(stats)
+	}()
 	// wait on the workers to finish and close the result channel
 	// to signal downstream that all work is done
 	go func() {
 		defer close(procmaps)
 		wg.Wait()
 	}()
-	// collect result
-	for pm := range procmaps {
-		result = append(result, pm)
-	}
 	// sort by Pid
 	sort.Sort(ProcMapByPid(result))
 	return

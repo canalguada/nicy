@@ -39,21 +39,19 @@ var buildCmd = &cobra.Command{
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		cacheFile := viper.GetString("database")
+		cacheFile := viper.GetString("cache")
+		contentCache := NewCache()
 		if !(exists(cacheFile)) || viper.GetBool("force") {
-			content := make(map[string]interface{}, 4)
-			content["date"] = timestamp()
-			for _, category := range [3]string{"cgroups", "types", "rules"} {
-				file := viper.GetString(category)
+			for _, category := range cfgMap["category"] {
+				file := viper.GetString(category + `s`)
 				if !(exists(file)) || viper.GetBool("force") {
 					// Dump content of configuration files into category cache file
-					result := make([]interface{}, 0, 128)
+					var result []interface{}
 					for _, root := range viper.GetStringSlice("confdirs") {
 						objects, err := dumpObjects(category, expandPath(root))
 						fatal(wrap(err))
 						result = append(result, objects...)
 					}
-					content[category] = result
 					// Write to category cache file
 					data, err := json.MarshalIndent(result, "", "  ")
 					fatal(wrap(err))
@@ -61,18 +59,21 @@ var buildCmd = &cobra.Command{
 					_, err = writeTo(file, data)
 					fatal(wrap(err))
 					cmd.PrintErrln("Done.")
+					// Save content
+					contentCache.AppendContent(category, result)
 				} else {
 					// Read content from category cache file
-					cmd.PrintErrf("Reading %s objects from cache... ", category)
+					cmd.PrintErrf("Reading %s presets from cache... ", category)
 					result, err := ReadCategoryCache(category)
 					fatal(wrap(err))
-					content[category] = result
 					cmd.PrintErrln("Done.")
+					// Save content
+					contentCache.AppendContent(category, result)
 				}
 			}
-			data, err := json.MarshalIndent(content, "", "  ")
+			// Write to cache file
+			data, err := json.MarshalIndent(contentCache, "", "  ")
 			fatal(wrap(err))
-			// Write to category cache file
 			cmd.PrintErrf("Writing %q cache file... ", cacheFile)
 			_, err = writeTo(cacheFile, data)
 			fatal(wrap(err))

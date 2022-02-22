@@ -460,9 +460,9 @@ func (script Script) ShellLines() (result []string) {
 	return
 }
 
-func (script *Script) String() (result string) {
+func (script Script) String() (result string) {
 	result = `[`
-	for _, line := range *script {
+	for _, line := range script {
 		result = result + ` ` + line.String()
 	}
 	result = result + `]`
@@ -477,8 +477,7 @@ func (script Script) PrepareRun(args []string) (result []CmdLine) {
 		}
 		// Append command args, if any, when required
 		if line.Index(0) == "exec" && len(args) > 0 {
-			quoted := ShellQuote(args)
-			line.Append(quoted...)
+			line.Append(args...)
 		}
 		result = append(result, line)
 	}

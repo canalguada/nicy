@@ -22,13 +22,9 @@ import (
 	"strings"
 	"strconv"
 	"regexp"
-	// "path/filepath"
+	"sort"
 	"io"
-	// "io/ioutil"
 	"encoding/json"
-	// "sync"
-	"github.com/canalguada/nicy/process"
-	// "github.com/canalguada/nicy/jq"
 	"github.com/spf13/viper"
 )
 
@@ -39,8 +35,6 @@ var (
 	reManaged *regexp.Regexp
 	reSystem *regexp.Regexp
 	reAnyNicy *regexp.Regexp
-	cgroupEntries = []string{"CPUQuota", "IOWeight", "MemoryHigh", "MemoryMax"}
-	cgroupKeys []string
 )
 
 func init() {
@@ -49,7 +43,6 @@ func init() {
 	reManaged = regexp.MustCompile(`user@\d+\.service/.+\.slice`)
 	reSystem = regexp.MustCompile(`system\.slice`)
 	reAnyNicy = regexp.MustCompile(`nicy.slice/nicy-.+\.slice`)
-	cgroupKeys = append(cgroupEntries, "cgroup")
 }
 
 // Commands here only change properties of some process or group of processes.
@@ -124,15 +117,15 @@ func ionice(class string, level int, pid int, pgrp int) (result CmdLine) {
 }
 
 type ProcJob struct {
-	process.ProcMap
+	ProcMap
 	Request RunInput		`json:"request"`
 	Entries CStringMap	`json:"entries"`
 	Commands Script			`json:"commands"`
 }
 
-func NewProcJob(obj *CStringMap) *ProcJob {
+func NewProcJob(obj CStringMap) *ProcJob {
 	job := &ProcJob{}
-	if data, err := json.Marshal(*obj); err == nil {
+	if data, err := json.Marshal(obj); err == nil {
 		fatal(json.Unmarshal(data, job))
 	}
 	return job
@@ -171,13 +164,20 @@ func (job ProcJob) GetStringEntry(name string) (result string) {
 func (job ProcJob) GetStringSliceEntry(name string) (result []string) {
 	value, found := job.Entries[name]
 	if found {
-		if value, ok := value.([]interface{}); ok {
+		switch value.(type) {
+		case []interface{}:
+			value, _ := value.([]interface{})
 			for _, v := range value {
 				switch v.(type) {
 				case string:
 					v, _ := v.(string)
 					result = append(result, v)
 				}
+			}
+		case []string:
+			value, _ := value.([]string)
+			for _, v := range value {
+				result = append(result, v)
 			}
 		}
 	}
@@ -357,9 +357,16 @@ func (job *ProcJob) inAnyNicySlice() bool {
 	return reAnyNicy.MatchString(job.Cgroup)
 }
 
+func (job *ProcJob) inProperSlice() bool {
+	if job.HasEntry("cgroup") {
+		flag, _ := regexp.MatchString(job.sliceUnit(), job.Cgroup)
+		return flag
+	}
+	return true
+}
+
 func (job *ProcJob) manager() (result string) {
-	if job.Pid == 0 {
-		// run command
+	if job.Pid == 0 { // run command
 		result = "${user_or_system}"
 	} else if job.inUserSlice() {
 		result = "--user"
@@ -371,8 +378,7 @@ func (job *ProcJob) manager() (result string) {
 
 func (job *ProcJob) prefix() (result []string) {
 	if job.Pid == 0 || job.inCurrentUserSlice() {
-		// run command or no privilege required
-		return
+		return // run command or no privilege required
 	// only root is expected to manage processes outside his slice.
 	} else if job.inUserSlice() {
 		// Current user MUST run the command as the slice owner.
@@ -388,8 +394,7 @@ func (job *ProcJob) prefix() (result []string) {
 			fmt.Sprintf("XDG_RUNTIME_DIR=%s", path),
 		)
 	} else if job.inSystemSlice() {
-		// In system.slice, current user must run the command as root.
-		if viper.GetInt("UID") != 0 {
+		if viper.GetInt("UID") != 0 { // current user must run the command as root
 			result = append(result, "$SUDO")
 		}
 	} else {
@@ -419,20 +424,16 @@ func (job *ProcJob) startSliceUnit() (unit string) {
 	if !(job.HasEntry("cgroup")) {
 		return
 	}
-	var (
-		base []string
-	)
+	var base []string
 	unit = job.sliceUnit()
 	prefix := job.prefix()
 	if len(prefix) > 0 {
 		base = append(base, prefix...)
 	}
 	base = append(base, "systemctl", job.manager())
-	// start unit
-	words := append(base, "start", unit, ">/dev/null")
+	words := append(base, "start", unit, ">/dev/null") // start unit
 	job.Commands.Append(NewCmdLine(words...))
-	// set properties
-	if job.HasEntry("slice_properties") {
+	if job.HasEntry("slice_properties") { // set properties
 		words := append(base, "--runtime", "set-property", unit)
 		properties := job.convertSliceProperties()
 		words = append(words, properties...)
@@ -457,6 +458,16 @@ func (job *ProcJob) getUnitProperty(entry string) (result string, present bool) 
 	return
 }
 
+func (job *ProcJob) unitPattern() string {
+	tokens := []string{job.Request.Name}
+	// add cgroup to get unique pattern, when moving processes
+	if job.HasEntry("cgroup") {
+		tokens = append(tokens, job.GetStringEntry("cgroup"))
+	}
+	tokens = append(tokens, `$$`)
+	return strings.Join(tokens, `-`)
+}
+
 func (job *ProcJob) AddExecCmd() error {
 	line := NewCmdLine("exec")
 	useScope := job.Request.Managed || job.HasEntry("cgroup")
@@ -478,25 +489,23 @@ func (job *ProcJob) AddExecCmd() error {
 		line.Append(
 			"systemd-run", "${user_or_system}", "-G", "-d",
 			"--no-ask-password", quiet, "--scope",
-			fmt.Sprintf("--unit=%s-$$", job.Request.Name),
+			fmt.Sprintf("--unit=%s", job.unitPattern()),
 		)
 		if unit := job.startSliceUnit(); len(unit) > 0 {
 			line.Append(fmt.Sprintf("--slice=%s", unit))
 		}
-		for _, entry := range cgroupEntries {
+		for _, entry := range cfgMap["systemd"] {
 			value, ok := job.getUnitProperty(entry)
 			if ok {
 				line.Append("-p", value)
 			}
 		}
-		// Adjust environment
-		for _, envvar := range job.getEnvironment() {
+		for _, envvar := range job.getEnvironment() { // Adjust environment
 			line.Append("-E", envvar)
 		}
 	} else {
-		// Adjust environment
 		envvars := job.getEnvironment()
-		if len(envvars) > 0 {
+		if len(envvars) > 0 { // Adjust environment
 			line.Append("env")
 			quoted := ShellQuote(envvars)
 			line.Append(quoted...)
@@ -508,8 +517,7 @@ func (job *ProcJob) AddExecCmd() error {
 }
 
 func (job *ProcJob) PrepareLaunch() error {
-	// No pid nor pgrp
-	job.AdjustNice(0, 0)
+	job.AdjustNice(0, 0) // No pid nor pgrp
 	job.AdjustSchedRTPrio(0)
 	job.AdjustIOClassIONice(0, 0)
 	job.AdjustOomScoreAdj(0)
@@ -574,18 +582,18 @@ type ProcGroupJob struct {
 	Pids []int				`json:"pids"`
 	Diff CStringMap		`json:"diff"`
 	Commands Script		`json:"commands"`
-	Procs []ProcJob		`json:"procs"`
+	Procs []*ProcJob		`json:"procs"`
 }
 
-func NewProcGroupJob(obj *CStringMap) *ProcGroupJob {
+func NewProcGroupJob(obj CStringMap) *ProcGroupJob {
 	job := &ProcGroupJob{}
-	if data, err := json.Marshal(*obj); err == nil {
+	if data, err := json.Marshal(obj); err == nil {
 		fatal(json.Unmarshal(data, job))
 	}
 	return job
 }
 
-func (job ProcGroupJob) HasDiff(name string) bool {
+func (job *ProcGroupJob) HasDiff(name string) bool {
 	_, found := job.Diff[name]
 	return found
 }
@@ -623,11 +631,17 @@ func (job *ProcGroupJob) AnyDiff(keys []string) (flag bool) {
 }
 
 func (job *ProcGroupJob) requireScope() bool {
-	return job.AnyDiff(cgroupKeys)
+	return job.AnyDiff(cfgMap["cgroup"])
 }
 
 func (job *ProcGroupJob) scopeUnit() string {
-	return fmt.Sprintf("%s-%d.scope", job.Procs[0].Request.Name, job.Procs[0].Pid)
+	tokens := []string{job.Procs[0].Request.Name}
+	// add cgroup to get unique pattern, when moving processes
+	if job.Procs[0].HasEntry("cgroup") {
+		tokens = append(tokens, job.Procs[0].GetStringEntry("cgroup"))
+	}
+	tokens = append(tokens, fmt.Sprintf("%d", job.Procs[0].Pid))
+	return fmt.Sprintf("%s.scope", strings.Join(tokens, `-`))
 }
 
 func (job *ProcGroupJob) moveProcGroup() error {
@@ -662,7 +676,7 @@ func (job *ProcGroupJob) moveProcGroup() error {
 }
 
 func (job *ProcGroupJob) hasScopeProperties() bool {
-	return job.AnyDiff(cgroupEntries)
+	return job.AnyDiff(cfgMap["systemd"])
 }
 
 func (job *ProcGroupJob) adjustNewScopeProperties() error {
@@ -677,7 +691,7 @@ func (job *ProcGroupJob) adjustNewScopeProperties() error {
 		"systemctl", job.Procs[0].manager(), "--runtime",
 		"set-property", job.scopeUnit(),
 	)
-	for _, entry := range cgroupEntries {
+	for _, entry := range cfgMap["systemd"] {
 		if job.HasDiff(entry) {
 			value, ok := job.Procs[0].getUnitProperty(entry)
 			if ok {
@@ -748,7 +762,7 @@ func (job *ProcGroupJob) PrepareAdjust() error {
 		}
 		if job.hasScopeProperties() {
 			// adjust relevant properties
-			for _, entry := range cgroupEntries {
+			for _, entry := range cfgMap["systemd"] {
 				if job.HasDiff(entry) {
 					value, ok := job.Procs[0].getUnitProperty(entry)
 					if ok {
@@ -784,39 +798,132 @@ func (job *ProcGroupJob) Run(tag string, stdout, stderr io.Writer) error {
 	}
 	// Finally run commands
 	var unprivilegedLines Script
-	// set ambient
-	nonfatal(setAmbient(true))
+	nonfatal(setAmbient(true)) // set ambient
 	viper.Set("ambient", getAmbient())
 	nonfatal(setDumpable())
 	for _, line := range job.Commands {
 		if line.skipWhenRun {
 			continue
 		}
-		// run only lines that require some capabilities
 		_, flag := line.RequireSysCapability(job.Procs[0].Uid)
-		if !(flag) {
+		if !(flag) { // run only lines that require some capabilities
 			unprivilegedLines.Append(line)
 			continue
 		}
 		if err := line.StartWait(id, nil, stdout, stderr); err != nil {
-			// Exit loop on error
 			warn(err)
-			break
+			break // exit loop on error
 		}
 	}
-	// reset ambient capabilities
-	nonfatal(setAmbient(false))
+	nonfatal(setAmbient(false)) // reset ambient capabilities
 	viper.Set("ambient", getAmbient())
 	nonfatal(setDumpable())
-	// run lines that don't require any capability
-	for _, line := range unprivilegedLines {
+	for _, line := range unprivilegedLines { // don't require any capability
 		if err := line.StartWait(id, nil, stdout, stderr); err != nil {
-			// Exit loop on error
 			warn(err)
-			break
+			break // exit loop on error
 		}
 	}
 	return nil
+}
+
+func ProcMapToProcJob(procmaps []*ProcMap) (result []*ProcJob) {
+	num := numCPU()
+	limit := int(rlimitNice().Max)
+	// sort first by Pgrp
+	sort.Sort(ProcMapByPgrp(procmaps))
+	for _, procmap := range procmaps {
+		name := strings.Split(procmap.Comm, `:`)[0]
+		job := &ProcJob{
+			ProcMap: *procmap,
+			Request: RunInput{
+				Name: name,
+				Path: fmt.Sprintf("%%%s%%", name),
+				Preset: "auto",
+				Quiet: true,
+				Shell: "/bin/sh",
+				NumCPU: num,
+				MaxNice: limit,
+				CPUSched: "0:other:0",
+				IOSched: "0:none:0",
+			},
+		}
+		result = append(result, job)
+	}
+	return
+}
+
+func (job *ProcGroupJob) Add(p *ProcJob) (err error) {
+	if p.Pgrp == job.Pgrp {
+		job.Pids = append(job.Pids, p.Pid)
+		job.Procs = append(job.Procs, p)
+	} else {
+		err = fmt.Errorf("%w: wrong pgrp: %d", ErrInvalid, p.Pgrp)
+		warn(err)
+	}
+	return
+}
+
+func GroupProcJobs(jobs []*ProcJob) (result *ProcGroupJob, remainder []*ProcJob) {
+	if len(jobs) == 0 {
+		return
+	}
+	// sort content
+	sort.SliceStable(jobs, func(i, j int) bool {
+		return jobs[i].Pid < jobs[j].Pid
+	})
+	leader := jobs[0]
+	result = &ProcGroupJob{ // new group job
+		Pgrp: leader.Pgrp,
+		Pids: []int{leader.Pid},
+		Diff: make(CStringMap), // TODO: redefine struct and use Preset
+		Procs: []*ProcJob{leader},
+	}
+	for _, job := range jobs[1:] { // add content
+		if job.Pgrp == result.Pgrp {
+			result.Pids = append(result.Pids, job.Pid)
+			result.Procs = append(result.Procs, job)
+		} else {
+			remainder = append(remainder, job)
+		}
+	}
+	return
+}
+
+func (job *ProcGroupJob) LeaderInfo() (result string) {
+	if len(job.Procs) > 0 {
+		result = fmt.Sprintf(
+			"Group pgrp %d leader (%s)[%d]",
+			job.Pgrp, job.Procs[0].Comm, job.Procs[0].Pid,
+		)
+	}
+	return
+}
+
+func ReviewGroupJobDiff(groupjob *ProcGroupJob) (err error) {
+	if len(groupjob.Procs) == 0 {
+		return
+	}
+	leader := groupjob.Procs[0] // process group leader only
+	input := leader.Request
+	// get entries
+	if preset, e := contentCache.GetRunPreset(&input); e != nil {
+		err = e
+		nonfatal(err)
+	} else { // review diff
+		leader.Entries = preset.StringMap() // set entries
+		groupjob.Diff = preset.Diff(leader.Runtime.GetStringMap()).StringMap()
+		// check cgroup: processes are easily movable when running inside
+		// session scope and some managed nicy slice
+		if _, found := groupjob.Diff["cgroup"]; found {
+			if leader.inProperSlice() { // running yet inside proper cgroup
+				delete(groupjob.Diff, "cgroup")
+			} else if !(leader.inAnyNicySlice()) && !(leader.inSessionScope()) {
+				delete(groupjob.Diff, "cgroup") // remove cgroup from groupjob.Diff
+			}
+		}
+	} // end process group leader only
+	return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

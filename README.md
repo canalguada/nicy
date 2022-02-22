@@ -9,7 +9,7 @@ I used to install [Ananicy](https://github.com/Nefelim4ag/Ananicy), an auto nice
 
 I write nicy because I need to control the available resources per program according to some more context, in other words adding options in a command line, not editing a configuration file as a privileged user.
 
-nicy was first implemented as a [shell script](https://github.com/canalguada/nicy/tree/sh#start-of-content), but now that it is implemented in Go langage, nicy can gain CAP_SYS_NICE capability at install time. User does not need superuser privileges in order to run some nicy commands in an non-interactive context.
+nicy was first implemented as a [shell script](https://github.com/canalguada/nicy/tree/sh#start-of-content), but now that it is implemented in Go langage, nicy can gain capabilities at install and run time. User does not need superuser privileges in order to run most of commands in an non-interactive context.
 
 ## Description
 nicy relies on existing system utilities and can be used to ease the control upon the execution environment of the managed processes and to configure the resources available to them: with renice(1), can alter their scheduling priority; with chrt(1), can set their real-time scheduling attributes and with ionice(1) their I/O scheduling class and priority; with choom(1), can adjust their Out-Of-Memory killer score setting.
@@ -23,41 +23,52 @@ nicy manages the processes applying them generic or specific presets stored in J
 ## Usage
 ```
 $ nicy run --dry-run go get github.com/itchyny/gojq/cmd/gojq
-nicy: run: systemctl --user start nicy-cpu16.slice
-nicy: run: systemctl --user --runtime set-property nicy-cpu16.slice CPUQuota=16%
-nicy: run: exec systemd-run --user -G -d --no-ask-password --quiet --unit=go-20156 --scope --slice=nicy-cpu16.slice --nice=19 chrt --idle 0 ionice -c 3 /usr/bin/go get github.com/itchyny/gojq/cmd/gojq
+nicy: run: dry-run: /usr/bin/renice -n 19 -p 20310
+nicy: run: dry-run: /usr/bin/chrt --idle -a -p 0 20310
+nicy: run: dry-run: /usr/bin/ionice -c 3 -p 20310
+nicy: run: dry-run: /usr/bin/systemctl --user start nicy-cpu16.slice
+nicy: run: dry-run: /usr/bin/systemctl --user --runtime set-property nicy-cpu16.slice CPUQuota=16%
+nicy: run: dry-run: /usr/bin/systemd-run --user -G -d --no-ask-password --quiet --scope --unit=go-20310 --slice=nicy-cpu16.slice /usr/lib/go-1.17/bin/go get github.com/itchyny/gojq/cmd/gojq
+
 ```
 ```
-$ nicy show nvim-qt
+$ nicy show nvim
 #!/bin/sh
-[ $(id -u) -ne 0 ] && user_or_system=--user || user_or_system=
-[ $(id -u) -ne 0 ] && SUDO=sudo || SUDO=
-$SUDO renice -n -3 -p $$ >/dev/null 2>&1
-systemctl ${user_or_system} start nicy-cpu66.slice >/dev/null 2>&1
-systemctl ${user_or_system} --runtime set-property nicy-cpu66.slice CPUQuota=66% >/dev/null 2>&1
-exec systemd-run ${user_or_system} -G -d --no-ask-password --quiet --unit=nvim-qt-$$ --scope --slice=nicy-cpu66.slice -E 'SHELL=/bin/bash -l' /usr/bin/nvim-qt --nofork --nvim /usr/bin/nvim "$@"
+[ $( id -u ) -ne 0 ] && SUDO=$SUDO || SUDO=
+$SUDO renice -n -3 -p $$ >/dev/null
+[ $( id -u ) -ne 0 ] && user_or_system=--user || user_or_system=--system
+systemctl ${user_or_system} start nicy-cpu33.slice >/dev/null
+systemctl ${user_or_system} --runtime set-property nicy-cpu33.slice CPUQuota=33% >/dev/null
+exec systemd-run ${user_or_system} -G -d --no-ask-password --quiet --scope --unit=nvim-$$ --slice=nicy-cpu33.slice -E SHELL=/bin/bash /usr/bin/nvim --listen /tmp/nvimsocket "$@"
+
 ```
 ```
 # nicy manage --dry-run --system
-nicy: manage: adjusting comm:cupsd pgrp:460 cgroup:cups.service pids:460
-nicy: manage: renice -n 19 -g 460
-nicy: manage: ionice -c 3 -P 460
-nicy: manage: chrt --idle -a -p 0 460
-nicy: manage: systemctl --runtime set-property cups.service CPUQuota=16%
-nicy: manage: adjusting comm:lightdm pgrp:540 cgroup:lightdm.service pids:540
-nicy: manage: ionice -c 1 -n 4 -P 540
-nicy: manage: adjusting comm:cups-browsed pgrp:550 cgroup:cups-browsed.service pids:550
-nicy: manage: renice -n 19 -g 550
-nicy: manage: ionice -c 3 -P 550
-nicy: manage: chrt --idle -a -p 0 550
-nicy: manage: systemctl --runtime set-property cups-browsed.service CPUQuota=16%
-nicy: manage: adjusting comm:Xorg pgrp:580 cgroup:lightdm.service pids:580
-nicy: manage: renice -n -10 -g 580
-nicy: manage: ionice -c 1 -n 1 -P 580
-nicy: manage: adjusting comm:apache2 pgrp:974 cgroup:apache2.service pids:974
-nicy: manage: renice -n 19 -g 974
-nicy: manage: ionice -c 2 -n 7 -P 974
-nicy: manage: systemctl --runtime set-property apache2.service CPUQuota=66%
+nicy: manage: dry-run: cupsd[465]: cgroup:cups.service pids:[465]
+nicy: manage: dry-run: cupsd[465]: /usr/bin/renice -n 19 -g 465
+nicy: manage: dry-run: cupsd[465]: /usr/bin/ionice -c 3 -P 465
+nicy: manage: dry-run: cupsd[465]: /usr/bin/chrt --idle -a -p 0 465
+nicy: manage: dry-run: cups-browsed[538]: cgroup:cups-browsed.service pids:[538]
+nicy: manage: dry-run: cups-browsed[538]: /usr/bin/renice -n 19 -g 538
+nicy: manage: dry-run: cups-browsed[538]: /usr/bin/ionice -c 3 -P 538
+nicy: manage: dry-run: cups-browsed[538]: /usr/bin/chrt --idle -a -p 0 538
+nicy: manage: dry-run: apache2[916]: cgroup:apache2.service pids:[916 917 919 920]
+nicy: manage: dry-run: apache2[916]: /usr/bin/renice -n 19 -g 916
+nicy: manage: dry-run: apache2[916]: /usr/bin/ionice -c 2 -n 7 -P 916
+
+```
+```
+$ nicy manage --dry-run --user
+nicy: manage: dry-run: pulseaudio[1299]: cgroup:pulseaudio.service pids:[1299]
+nicy: manage: dry-run: pulseaudio[1299]: /usr/bin/ionice -c 1 -P 1299
+nicy: manage: dry-run: pulseaudio[1299]: /usr/bin/chrt --rr -a -p 1 1299
+nicy: manage: dry-run: nvim[2270]: cgroup:nvim-2270.scope pids:[2270]
+nicy: manage: dry-run: nvim[2270]: /usr/bin/systemctl --user start nicy-cpu33.slice
+nicy: manage: dry-run: nvim[2270]: /usr/bin/systemctl --user --runtime set-property nicy-cpu33.slice CPUQuota=33%
+nicy: manage: dry-run: nvim[2270]: /usr/bin/busctl call --quiet --user org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit ssa(sv)a(sa(sv)) nvim-2270.scope fail 2 PIDs au 1 2270 Slice s nicy-cpu33.slice 0
+nicy: manage: dry-run: cmus[2274]: cgroup:session-1.scope pids:[2274]
+nicy: manage: dry-run: cmus[2274]: /usr/bin/renice -n -3 -g 2274
+nicy: manage: dry-run: cmus[2274]: /usr/bin/ionice -c 1 -P 2274
 ```
 
 ## Requirements
@@ -69,6 +80,10 @@ Most of cgroup settings are supported only with the unified control group hierar
 
 ## Installation
 ### From source
+Build:
+```
+$ make
+```
 Install in /usr/local:
 ```
 $ sudo make install
