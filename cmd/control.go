@@ -24,11 +24,11 @@ import (
 	"github.com/spf13/viper"
 )
 
-// manageCmd represents the manage command
-var manageCmd = &cobra.Command{
-	Use:   "manage [-n] [-u|-g|-s|-a] [-m [-t SECONDS]]",
-	Short: "Manage running processes",
-	Long: `Manage once, or repeatedly, the running processes, applying rules, if any
+// controlCmd represents the control command
+var controlCmd = &cobra.Command{
+	Use:   "control [-n] [-u|-g|-s|-a] [-t SECONDS]",
+	Short: "Control running processes",
+	Long: `Control the running processes, applying rules, if any
 
 The processes are selected when their group leader matches an existing rule.
 The --user option is the implied default, when none is given.
@@ -40,7 +40,7 @@ Only superuser can fully run manage command with --system, --global or --all opt
 		if err := checkConsistency(fs, cfgMap["scopes"]); err != nil {
 			return err
 		}
-		names := append(cfgMap["scopes"], "dry-run", "monitor", "tick")
+		names := append(cfgMap["scopes"], "dry-run", "tick")
 		// Bind shared flags
 		bindFlags(cmd, names...)
 		if tick := viper.GetDuration("tick"); tick.Seconds() < 5 || tick.Seconds() > 3600 {
@@ -50,7 +50,7 @@ Only superuser can fully run manage command with --system, --global or --all opt
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		viper.Set("tag", "manage")
+		viper.Set("tag", "control")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
@@ -66,38 +66,36 @@ Only superuser can fully run manage command with --system, --global or --all opt
 				cmd.PrintErrln(err)
 			}
 		}()
-		err := adjustCommand( // was manageCommand
+		err := controlCommand(
 			"",
 			GetFilterer(scope),
 			cmd.OutOrStdout(), cmd.ErrOrStderr(),
 		)
 		fatal(wrap(err))
-		// TODO: suppress after full debug
-		// cmd.Println(prettyJson(getManageInput(filter)))
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(manageCmd)
+	// rootCmd.AddCommand(controlCmd)
 
 	// Here you will define your flags and configuration settings.
 
 	// Cobra supports Persistent Flags which will work for this command
 	// and all subcommands, e.g.:
-	// manageCmd.PersistentFlags().String("foo", "", "A help for foo")
+	// controlCmd.PersistentFlags().String("foo", "", "A help for foo")
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	fs := manageCmd.Flags()
+	fs := controlCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
 
-	addDumpManageFlags(manageCmd)
-	addDryRunFlag(manageCmd)
-	fs.BoolP("monitor", "m", false, "run continuously")
+	addDumpManageFlags(controlCmd)
+	addDryRunFlag(controlCmd)
+	// fs.BoolP("monitor", "m", false, "run continuously")
 	fs.DurationP("tick", "t", 5 * time.Second, "delay between consecutive runs in seconds")
 
-	manageCmd.InheritedFlags().SortFlags = false
+	controlCmd.InheritedFlags().SortFlags = false
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

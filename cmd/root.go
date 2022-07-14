@@ -69,18 +69,32 @@ func debug(v ...interface{}) {
 	if viper.GetBool("debug") {
 		lv := []interface{}{"debug:"}
 		lv = append(lv, v...)
-		logger.Println(lv...)
+		notify(lv...)
 	}
 }
 
 func warn(v ...interface{}) {
 	lv := []interface{}{"error:"}
 	lv = append(lv, v...)
-	logger.Println(lv...)
+	notify(lv...)
 }
 
-func inform(v ...interface{}) {
+func notify(v ...interface{}) {
 	logger.Println(v...)
+}
+
+func inform(tag string, args ...string) {
+	var s = []string{viper.GetString("tag") + ":"}
+	if viper.GetBool("dry-run") {
+		s = append(s, "dry-run:")
+	}
+	if len(tag) > 0 {
+		s = append(s, tag + ":")
+	}
+	if len(args) > 0 {
+		s = append(s, args...)
+	}
+	notify(strings.Join(s, ` `))
 }
 
 // var (
@@ -194,7 +208,8 @@ func init() {
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(dumpCmd)
-	rootCmd.AddCommand(manageCmd)
+	rootCmd.AddCommand(setCmd)
+	rootCmd.AddCommand(controlCmd)
 	rootCmd.AddCommand(installCmd)
 }
 

@@ -790,11 +790,11 @@ func (job *ProcGroupJob) Run(tag string, stdout, stderr io.Writer) error {
 	id := fmt.Sprintf("%s[%d]", job.Procs[0].Comm, job.Pgrp)
 	info := fmt.Sprintf("%s: cgroup:%s pids:%v", id, job.Procs[0].Unit, job.Pids)
 	if viper.GetBool("verbose") || viper.GetBool("dry-run") {
-		doVerbose(tag, info)
+		inform(tag, info)
 	}
 	if viper.GetBool("verbose") && viper.GetBool("debug") {
-		doVerbose(tag, fmt.Sprintf( "%s: diff: %v", id, job.Diff))
-		doVerbose("", fmt.Sprintf( "%s: commands: %v", id, job.Commands))
+		inform(tag, fmt.Sprintf( "%s: diff: %v", id, job.Diff))
+		inform("", fmt.Sprintf( "%s: commands: %v", id, job.Commands))
 	}
 	// Finally run commands
 	var unprivilegedLines Script

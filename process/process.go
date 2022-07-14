@@ -250,8 +250,12 @@ func (p *Proc) setUser() (err error) {
 
 func (p *Proc) setCgroup() (err error) {
 	if cgroup, err := GetCgroup(p.Pid); err == nil {
-		parts := strings.Split(cgroup, `/`)
-		p.Cgroup = [3]string{cgroup, parts[1], parts[len(parts) - 1]}
+		if cgroup != "0::/" {
+			parts := strings.Split(cgroup, `/`)
+			p.Cgroup = [3]string{cgroup, parts[1], parts[len(parts) - 1]}
+		} else {
+			p.Cgroup = [3]string{"0::/", ``, ``}
+		}
 	}
 	return
 }

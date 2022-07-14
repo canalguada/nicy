@@ -1,13 +1,32 @@
 module github.com/canalguada/nicy
 
-go 1.15
+go 1.17
 
 require (
-	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
-	github.com/mitchellh/go-homedir v1.0.0
-	github.com/spf13/cobra v1.2.1
+	github.com/itchyny/gojq v0.12.7
+	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
+	github.com/mitchellh/go-homedir v1.1.0
+	github.com/spf13/cobra v1.4.0
 	github.com/spf13/pflag v1.0.5
-	github.com/spf13/viper v1.8.1
-	golang.org/x/sys v0.0.0-20210630005230-0f9fa26af87c
-	kernel.org/pub/linux/libs/security/libcap/cap v1.2.51
+	github.com/spf13/viper v1.10.1
+	golang.org/x/sys v0.0.0-20220317061510-51cd9980dadf
+	kernel.org/pub/linux/libs/security/libcap/cap v1.2.63
+)
+
+require (
+	github.com/fsnotify/fsnotify v1.5.1 // indirect
+	github.com/hashicorp/hcl v1.0.0 // indirect
+	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+	github.com/itchyny/timefmt-go v0.1.3 // indirect
+	github.com/magiconair/properties v1.8.5 // indirect
+	github.com/mitchellh/mapstructure v1.4.3 // indirect
+	github.com/pelletier/go-toml v1.9.4 // indirect
+	github.com/spf13/afero v1.6.0 // indirect
+	github.com/spf13/cast v1.4.1 // indirect
+	github.com/spf13/jwalterweatherman v1.1.0 // indirect
+	github.com/subosito/gotenv v1.2.0 // indirect
+	golang.org/x/text v0.3.7 // indirect
+	gopkg.in/ini.v1 v1.66.2 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.63 // indirect
 )

@@ -53,10 +53,15 @@ var (
 	GetFilterer = process.GetFilterer
 	GetFormatter = process.GetFormatter
 	reNoComment *regexp.Regexp
+	goMaxProcs = runtime.GOMAXPROCS(0)
 )
 
 func init() {
 	reNoComment = regexp.MustCompile(`^[ ]*#`)
+}
+
+func getWaitGroup() (wg sync.WaitGroup) {
+	return
 }
 
 // Build command
@@ -302,7 +307,7 @@ func getRunJob(shell string, args []string, output chan<- *ProcJob, wgmain *sync
 	inputs := make(chan *RunInput)
 	jobs := make(chan *ProcJob)
 	// spin up workers
-	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 	wg.Add(1) // get commands
 	go func() {
 		defer wg.Done()
@@ -330,7 +335,7 @@ func showCommand(shell string, args []string) (result []string, err error) {
 	// prepare channels
 	jobs := make(chan *ProcJob, 2)
 	// spin up workers
-	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 	wg.Add(1) // get result
 	result = append(result, `#!`+ shell)
 	go func () {
@@ -389,7 +394,7 @@ func runCommand(tag string, args []string, stdin io.Reader, stdout, stderr io.Wr
 	// prepare channels
 	jobs := make(chan *ProcJob, 2)
 	// spin up workers
-	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 	wg.Add(1) // run commands
 	go func () {
 		defer wg.Done()
@@ -407,6 +412,39 @@ func runCommand(tag string, args []string, stdin io.Reader, stdout, stderr io.Wr
 
 // Manage command
 
+func prepareGroupJobs(input <-chan *ProcGroupJob, output chan<- *ProcGroupJob, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for groupjob := range input {
+		nonfatal(groupjob.PrepareAdjust())
+		output <- groupjob
+	}
+	close(output)
+}
+
+func createGroupJob(pgrp int, procmaps []*ProcMap, output chan<- *ProcGroupJob, wg *sync.WaitGroup) {
+	defer wg.Done()
+	jobs := ProcMapToProcJob(procmaps)
+	groupjob, _ := GroupProcJobs(jobs)
+	_ = ReviewGroupJobDiff(groupjob)
+	if viper.GetBool("debug") && viper.GetBool("verbose") {
+		for k, v := range map[string]Preset {
+			"preset": Preset(groupjob.Procs[0].Entries),
+			"diff": Preset(groupjob.Diff),
+		} {
+			inform("", fmt.Sprintf(
+				"%s %s: %v\n", groupjob.LeaderInfo(), k, v,
+			))
+		}
+	}
+	if pgrp != groupjob.Pgrp {
+		warn(fmt.Errorf("%w: wrong pgrp: %d", ErrInvalid, groupjob.Pgrp))
+	}
+	if len(groupjob.Diff) > 0 {
+		output <- groupjob
+	}
+	// no close here but in parent
+}
+
 func buildProcGroupJob(input <-chan []*ProcMap, output chan<- *ProcGroupJob, wgmain *sync.WaitGroup) (err error) {
 	defer wgmain.Done()
 	for procmaps := range input {
@@ -416,7 +454,7 @@ func buildProcGroupJob(input <-chan []*ProcMap, output chan<- *ProcGroupJob, wgm
 			byPgrp[procmap.Pgrp] = append(byPgrp[procmap.Pgrp], procmap)
 		}
 		// build ProcGroupJob
-		var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+		wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 		for pgrp, procmaps := range byPgrp { // spin up workers
 			wg.Add(1)
 			go func(pgrp int, procmaps []*ProcMap) {
@@ -429,7 +467,7 @@ func buildProcGroupJob(input <-chan []*ProcMap, output chan<- *ProcGroupJob, wgm
 						"preset": Preset(groupjob.Procs[0].Entries),
 						"diff": Preset(groupjob.Diff),
 					} {
-						doVerbose("", fmt.Sprintf(
+						inform("", fmt.Sprintf(
 							"%s %s: %v\n", groupjob.LeaderInfo(), k, v,
 						))
 					}
@@ -448,7 +486,24 @@ func buildProcGroupJob(input <-chan []*ProcMap, output chan<- *ProcGroupJob, wgm
 	return
 }
 
-func getAdjustJob(input <-chan []*Proc, output chan<- *ProcGroupJob, wgmain *sync.WaitGroup) (err error) {
+// use []*Proc from FilteredProcs(filter) to produce ProcMap input only
+// when relevant to existing content cache.
+func filterProcMaps(input <-chan []*Proc, output chan<- []*ProcMap, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for procs := range input {
+		var maps []*ProcMap
+		for _, p := range procs {
+			name := strings.Split(p.Comm, `:`)[0]
+			if contentCache.HasPreset("rule", name) {
+				maps = append(maps, NewProcMap(p))
+			}
+		}
+		output <- maps
+	}
+	close(output)
+}
+
+func getGroupJobs(input <-chan []*Proc, output chan<- *ProcGroupJob, wgmain *sync.WaitGroup) (err error) {
 	defer wgmain.Done()
 	contentCache, err = ReadFile() // get cache content, once for all goroutines
 	fatal(wrap(err))
@@ -456,35 +511,28 @@ func getAdjustJob(input <-chan []*Proc, output chan<- *ProcGroupJob, wgmain *syn
 	jobs := make(chan *ProcGroupJob, 8)
 	procmaps := make(chan []*ProcMap, 8)
 	// spin up workers
-	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
-	wg.Add(1) // prepare process group jobs
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	wg.Add(1) // prepare process group jobs adding commands
+	go prepareGroupJobs(jobs, output, &wg)
+	wg.Add(1) // split procmaps and build process group jobs
 	go func() {
 		defer wg.Done()
-		for groupjob := range jobs {
-			nonfatal(groupjob.PrepareAdjust())
-			output <- groupjob
-		}
-		close(output)
-	}()
-	wg.Add(1) // filter process group jobs
-	go buildProcGroupJob(procmaps, jobs, &wg)
-	wg.Add(1) // preparing input
-	// use []*Proc from FilteredProcs(filter) to produce ProcMap input only
-	// when relevant to existing content cache.
-	go func() {
-		defer wg.Done()
-		for procs := range input {
-			var addresses []*ProcMap
-			for _, p := range procs {
-				name := strings.Split(p.Comm, `:`)[0]
-				if contentCache.HasPreset("rule", name) {
-					addresses = append(addresses, NewProcMap(p))
-				}
+		for maps := range procmaps {
+			byPgrp := make(map[int][]*ProcMap) // split input per Pgrp
+			for _, procmap := range maps {
+				byPgrp[procmap.Pgrp] = append(byPgrp[procmap.Pgrp], procmap)
 			}
-			procmaps <- addresses
+			child := getWaitGroup() // use a sync.WaitGroup to indicate completion
+			for pgrp, pgrpmaps := range byPgrp { // spin up workers
+				child.Add(1) // build ProcGroupJob
+				go createGroupJob(pgrp, pgrpmaps, jobs, &child)
+			}
+			child.Wait() // wait on the workers to finish
 		}
-		close(procmaps)
+		close(jobs)
 	}()
+	wg.Add(1) // filter procs and prepare procmaps
+	go filterProcMaps(input, procmaps, &wg)
 	wg.Wait() // wait on the workers to finish
 	return
 }
@@ -512,14 +560,14 @@ func sendAdjustInput(filter Filterer, output chan<- []*Proc, wgmain *sync.WaitGr
 							case unix.SIGHUP:
 								// TODO: Reload cache here
 								if viper.GetBool("dry-run") || viper.GetBool("verbose") {
-									doVerbose("monitor", "Reloading cache...")
+									inform("monitor", "Reloading cache...")
 								}
 							case os.Interrupt:
 								cancel()
 								os.Exit(1)
 						}
 					case <-ctx.Done():
-						doVerbose("monitor", "Done.")
+						inform("monitor", "Done.")
 						os.Exit(0)
 				}
 			}
@@ -543,9 +591,10 @@ func adjustCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err e
 	runjobs := make(chan *ProcGroupJob, 8)
 	procs := make(chan []*Proc, 8)
 	// spin up workers
-	var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
-	count := runtime.GOMAXPROCS(0) + 1
-	for i := 0; i < count; i++ {
+	// var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
+	// count := runtime.GOMAXPROCS(0) + 1
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	for i := 0; i < (goMaxProcs + 1); i++ {
 		wg.Add(1) // run jobs
 		go func() {
 			defer wg.Done()
@@ -555,7 +604,7 @@ func adjustCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err e
 		}()
 	}
 	wg.Add(1) // get jobs
-	go getAdjustJob(procs, runjobs, &wg)
+	go getGroupJobs(procs, runjobs, &wg)
 	// send input
 	if viper.GetBool("verbose") {
 		action := "Managing"
@@ -575,6 +624,76 @@ func adjustCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err e
 	return
 }
 
+func controlCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err error) {
+	// prepare channels
+	runjobs := make(chan *ProcGroupJob, 8)
+	procs := make(chan []*Proc, 8)
+	// and signal
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, unix.SIGHUP)
+	defer func() {
+		signal.Stop(signalChan)
+		cancel()
+	}()
+	// spin up workers
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	for i := 0; i < (goMaxProcs + 1); i++ {
+		wg.Add(1) // run jobs
+		go func() {
+			defer wg.Done()
+			for job := range runjobs {
+				job.Run(tag, stdout, stderr)
+			}
+		}()
+	}
+	wg.Add(1) // get jobs
+	go getGroupJobs(procs, runjobs, &wg)
+	// send input
+	if viper.GetBool("verbose") {
+		fmt.Fprintf(stderr, "Controlling %v...\n", filter)
+	}
+	wg.Add(1)
+	// go sendAdjustInput(filter, procs, &wg)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+				case s := <-signalChan:
+					switch s {
+						case unix.SIGHUP:
+							// TODO: Reload cache here
+							if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+								inform("monitor", "Reloading cache...")
+							}
+						case os.Interrupt:
+							cancel()
+							os.Exit(1)
+					}
+				case <-ctx.Done():
+					inform("monitor", "Done.")
+					break
+					// os.Exit(0)
+			}
+		}
+	}()
+	procs <- FilteredProcs(filter)
+	for {
+		select {
+			case <-ctx.Done():
+				break
+				// close(output)
+				// return
+			case <-time.Tick(viper.GetDuration("tick")):
+				procs <- FilteredProcs(filter)
+		}
+	}
+	close(procs)
+	wg.Wait() // wait on the workers to finish
+	return
+
+}
 // TODO: Install command
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

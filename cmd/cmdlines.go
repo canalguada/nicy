@@ -297,22 +297,8 @@ func (line CmdLine) getCmd(tag string, std *Streams) (cmd *exec.Cmd, err error) 
 func whenVerbose(tag, path string, args ...string) {
 	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
 		words := append([]string{path}, args...)
-		doVerbose(tag, words...)
+		inform(tag, words...)
 	}
-}
-
-func doVerbose(tag string, args ...string) {
-	var s = []string{viper.GetString("tag") + ":"}
-	if viper.GetBool("dry-run") {
-		s = append(s, "dry-run:")
-	}
-	if len(tag) > 0 {
-		s = append(s, tag + ":")
-	}
-	if len(args) > 0 {
-		s = append(s, args...)
-	}
-	inform(strings.Join(s, ` `))
 }
 
 func (line *CmdLine) preRun() (err error) {

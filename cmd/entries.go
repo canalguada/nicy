@@ -161,7 +161,7 @@ func (p Preset) Trace(tag string, subkey string) {
 		if len(tag) > 0 {
 			s = append(s, fmt.Sprintf("(%s)", tag))
 		}
-		inform(s...)
+		notify(s...)
 	}
 }
 
@@ -263,7 +263,9 @@ func (c *Cache) getPreset(key string, subkey string) (p Preset, err error) {
 		p = c.Content[key][subkey][0]
 	} else {
 		err = fmt.Errorf("%s not found: %s", key, subkey)
-		inform(err)
+		if viper.GetBool("verbose") {
+			notify(err)
+		}
 	}
 	return
 }
