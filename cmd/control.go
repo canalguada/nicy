@@ -19,7 +19,6 @@ package cmd
 import (
 	"fmt"
 	"time"
-	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -92,7 +91,6 @@ func init() {
 
 	addDumpManageFlags(controlCmd)
 	addDryRunFlag(controlCmd)
-	// fs.BoolP("monitor", "m", false, "run continuously")
 	fs.DurationP("tick", "t", 5 * time.Second, "delay between consecutive runs in seconds")
 
 	controlCmd.InheritedFlags().SortFlags = false

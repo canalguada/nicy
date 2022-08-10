@@ -17,11 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	// "fmt"
-	// "os"
-	// "strings"
-	// "encoding/json"
-	// flag "github.com/spf13/pflag"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

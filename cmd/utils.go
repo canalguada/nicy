@@ -34,24 +34,10 @@ import (
 	"runtime"
 	"sync"
 	"golang.org/x/sys/unix"
-	"github.com/canalguada/nicy/process"
 	"github.com/spf13/viper"
 )
 
-type (
-	Proc = process.Proc
-	ProcMap = process.ProcMap
-	Filterer = process.Filterer
-	ProcMapByPgrp = process.ProcMapByPgrp
-)
-
 var (
-	GetCalling = process.GetCalling
-	NewProcMap = process.NewProcMap
-	// FilteredProcs func (filter Filterer) []*Proc = process.FilteredProcs
-	FilteredProcs = process.FilteredProcs
-	GetFilterer = process.GetFilterer
-	GetFormatter = process.GetFormatter
 	reNoComment *regexp.Regexp
 	goMaxProcs = runtime.GOMAXPROCS(0)
 )
@@ -410,7 +396,7 @@ func runCommand(tag string, args []string, stdin io.Reader, stdout, stderr io.Wr
 	return nil
 }
 
-// Manage command
+// Set and control commands
 
 func prepareGroupJobs(input <-chan *ProcGroupJob, output chan<- *ProcGroupJob, wg *sync.WaitGroup) {
 	defer wg.Done()
@@ -537,62 +523,11 @@ func getGroupJobs(input <-chan []*Proc, output chan<- *ProcGroupJob, wgmain *syn
 	return
 }
 
-func sendAdjustInput(filter Filterer, output chan<- []*Proc, wgmain *sync.WaitGroup) (err error) {
-	defer wgmain.Done()
-	// send slice once
-	output <- FilteredProcs(filter)
-	if viper.GetBool("monitor") {
-		// then, if required, send more forever, till cancel or interrupt
-		ctx := context.Background()
-		ctx, cancel := context.WithCancel(ctx)
-		signalChan := make(chan os.Signal, 1)
-		signal.Notify(signalChan, os.Interrupt, unix.SIGHUP)
-		defer func() {
-			signal.Stop(signalChan)
-			cancel()
-		}()
-		// TODO: check if two infinite loops are required
-		go func() {
-			for {
-				select {
-					case s := <-signalChan:
-						switch s {
-							case unix.SIGHUP:
-								// TODO: Reload cache here
-								if viper.GetBool("dry-run") || viper.GetBool("verbose") {
-									inform("monitor", "Reloading cache...")
-								}
-							case os.Interrupt:
-								cancel()
-								os.Exit(1)
-						}
-					case <-ctx.Done():
-						inform("monitor", "Done.")
-						os.Exit(0)
-				}
-			}
-		}()
-		for {
-			select {
-				case <-ctx.Done():
-					close(output)
-					return
-				case <-time.Tick(viper.GetDuration("tick")):
-					output <- FilteredProcs(filter)
-			}
-		}
-	}
-	close(output)
-	return
-}
-
 func adjustCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err error) {
 	// prepare channels
 	runjobs := make(chan *ProcGroupJob, 8)
 	procs := make(chan []*Proc, 8)
 	// spin up workers
-	// var wg sync.WaitGroup // use a sync.WaitGroup to indicate completion
-	// count := runtime.GOMAXPROCS(0) + 1
 	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 	for i := 0; i < (goMaxProcs + 1); i++ {
 		wg.Add(1) // run jobs
@@ -607,19 +542,10 @@ func adjustCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err e
 	go getGroupJobs(procs, runjobs, &wg)
 	// send input
 	if viper.GetBool("verbose") {
-		action := "Managing"
-		if viper.GetBool("monitor") {
-			action = "Monitoring"
-		}
-		fmt.Fprintf(stderr, "%s %v...\n", action, filter)
+		fmt.Fprintf(stderr, "Adjusting %v...\n", filter)
 	}
-	if !(viper.GetBool("monitor")) {
-		procs <- FilteredProcs(filter)
-		close(procs)
-	} else {
-		wg.Add(1)
-		go sendAdjustInput(filter, procs, &wg)
-	}
+	procs <- FilteredProcs(filter)
+	close(procs)
 	wg.Wait() // wait on the workers to finish
 	return
 }
@@ -633,8 +559,10 @@ func controlCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err 
 	ctx, cancel := context.WithCancel(ctx)
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, unix.SIGHUP)
+	ticker := time.NewTicker(viper.GetDuration("tick"))
 	defer func() {
 		signal.Stop(signalChan)
+		ticker.Stop()
 		cancel()
 	}()
 	// spin up workers
@@ -655,7 +583,6 @@ func controlCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err 
 		fmt.Fprintf(stderr, "Controlling %v...\n", filter)
 	}
 	wg.Add(1)
-	// go sendAdjustInput(filter, procs, &wg)
 	go func() {
 		defer wg.Done()
 		for {
@@ -685,7 +612,7 @@ func controlCommand(tag string, filter Filterer, stdout, stderr io.Writer) (err 
 				break
 				// close(output)
 				// return
-			case <-time.Tick(viper.GetDuration("tick")):
+			case <-ticker.C:
 				procs <- FilteredProcs(filter)
 		}
 	}
