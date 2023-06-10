@@ -32,12 +32,11 @@ The installation path is set to :
 - $HOME/bin/nicy for regular user;
 - /usr/local/bin/nicy for system user;
 - any writable path DESTDIR with --dest option.`,
-	Args: cobra.MaximumNArgs(0),
+	Args:                  cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		// Bind flags
-		bindFlags(cmd, "shell", "dest")
-		return nil
+		// Bind shared flags
+		return viper.BindPFlags(cmd.LocalNonPersistentFlags())
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		viper.Set("tag", "install")
@@ -48,24 +47,14 @@ The installation path is set to :
 }
 
 func init() {
-	// rootCmd.AddCommand(installCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// installCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
+	// Persistent flags
+	// Local flags
 	fs := installCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-
 	fs.String("shell", "", "generate script for `SHELL`")
 	fs.String("dest", "", "install inside `DESTDIR`")
 	fs.BoolP("run", "r", false, "use run command")
-
 	installCmd.InheritedFlags().SortFlags = false
 }
 

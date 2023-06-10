@@ -3,8 +3,8 @@ DESTDIR		?=
 package		= nicy
 program		= nicy
 git_branch	= master
-version		= 0.1.6
-revision	= 5
+version		= 0.2.0
+revision	= 1
 release_dir	= build
 prefix		= /usr/local
 bindir		= $(prefix)/bin
@@ -39,15 +39,15 @@ distclean:
 
 .PHONY: man
 man:
-	cd man/fragments ; \
-	cat HEADERS SYNOPSIS DESCRIPTION COMMANDS OPTIONS FILES \
-	CONFIGURATION EXAMPLES VARIABLES DIAGNOSTICS BUGS SEE_ALSO \
-	NOTES | \
-	sed \
-	-e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
-	- > ../$(program).1 ; \
-	cd .. ; \
-	gzip -9 -f $(program).1
+	cd man ; \
+	sed -e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
+		$(program).1.md  | \
+	pandoc -s -f markdown -t man > $(program).1 ; gzip -9 -f $(program).1
+	cd man ; \
+	sed -e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
+		$(program).5.md  | \
+	pandoc -s -f markdown -t man > $(program).5 ; gzip -9 -f $(program).5
+
 
 .PHONY: deb
 deb:
@@ -73,14 +73,12 @@ install-bin:
 install-man: man
 	install -d $(DESTDIR)$(prefix)/share/man/man1
 	install -m644 man/$(program).1.gz $(DESTDIR)$(prefix)/share/man/man1/
+	install -d $(DESTDIR)$(prefix)/share/man/man5
+	install -m644 man/$(program).5.gz $(DESTDIR)$(prefix)/share/man/man5/
 
 .PHONY: install-conf
 install-conf:
-	install -d $(DESTDIR)$(confdir)/rules.d
-	install -m644 conf/config.yaml $(DESTDIR)$(confdir)/
-	install -m644 conf/00-cgroups.cgroups $(DESTDIR)$(confdir)/
-	install -m644 conf/00-types.types $(DESTDIR)$(confdir)/
-	install -m644 conf/rules.d/vim.rules $(DESTDIR)$(confdir)/rules.d/
+	install -m644 -D -T conf/config.yaml $(DESTDIR)$(confdir)/v$(version).yaml
 
 
 .PHONY: install
@@ -93,14 +91,11 @@ uninstall-bin:
 .PHONY: uninstall-man
 uninstall-man:
 	rm -f $(DESTDIR)$(prefix)/share/man/man1/$(program).1.gz
+	rm -f $(DESTDIR)$(prefix)/share/man/man5/$(program).5.gz
 
 .PHONY: uninstall-conf
 uninstall-conf:
-	rm -f $(DESTDIR)$(confdir)/environment
-	rm -f $(DESTDIR)$(confdir)/00-cgroups.cgroups
-	rm -f $(DESTDIR)$(confdir)/00-types.types
-	rm -f $(DESTDIR)$(confdir)/rules.d/vim.rules
-	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(confdir)/rules.d
+	rm -f $(DESTDIR)$(confdir)/v$(version).yaml
 	rmdir --ignore-fail-on-non-empty $(DESTDIR)$(confdir)
 
 .PHONY: uninstall

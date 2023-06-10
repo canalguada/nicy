@@ -2,117 +2,121 @@
 package cmd
 
 import (
-	"log"
-	"encoding/json"
-	"sort"
-	"path/filepath"
 	"io/ioutil"
-	"sync"
-	"runtime"
-	"github.com/canalguada/goprocfs"
+	"log"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/canalguada/procfs"
 )
 
 type (
-	Proc = goprocfs.Proc
-	Filterer = goprocfs.Filterer
+	Proc         = procfs.Proc
+	ProcFilterer = procfs.Filterer[Proc]
+	ProcFilter   = procfs.ProcFilter
+	FilterProc   = procfs.FilterAny[Proc]
 )
 
 var (
-	GetCalling = goprocfs.GetCalling
-	NewProcFromStat = goprocfs.NewProcFromStat
-	FilteredProcs = goprocfs.FilteredProcs
-	GetFilterer = goprocfs.GetFilterer
-	GetFormatter = goprocfs.GetFormatter
+	GetCalling           = procfs.GetCalling
+	NewProcFromStat      = procfs.NewProcFromStat
+	FilteredProcs        = procfs.FilteredProcs
+	GetScopeOnlyFilterer = procfs.GetFilterer
+	NewProcScopeFilter   = procfs.NewProcScopeFilter
+	GetFormatter         = procfs.GetFormatter
 )
 
-type MainProperties struct {
-	Nice int				`json:"nice"`
-	Sched string		`json:"sched"`
-	RTPrio int			`json:"rtprio"`
-	IOClass string	`json:"ioclass"`
-	IONice int			`json:"ionice"`
-	OomScoreAdj int	`json:"oom_score_adj"`
+var ruleFilter = FilterProc{
+	Filter: func(p *Proc, err error) bool {
+		if err == nil {
+			if _, err = presetCache.Rule(strings.Split(p.Comm, `:`)[0]); err == nil {
+				return true
+			}
+		}
+		return false
+	},
+	Message: "processes with a preset",
 }
 
-func (p *MainProperties) GetStringMap() (result map[string]interface{}) {
-	if data, err := json.Marshal(*p); err != nil {
-		panic(err)
-	} else if err := json.Unmarshal(data, &result); err != nil {
-		panic(err)
+func GetFilterer(scope string) ProcFilterer {
+	if presetCache.Date == "" {
+		presetCache = GetPresetCache()
 	}
-	return
+	filter := NewProcScopeFilter(scope)
+	return ProcFilterer(ProcFilter{
+		FilterProc: FilterProc{
+			Filter: func(p *Proc, err error) bool {
+				if ruleFilter.Filter(p, err) {
+					return filter.Filter(p, nil)
+				}
+				return false
+			},
+			Message: filter.String(),
+		},
+		Scope: scope,
+	})
 }
 
 type ProcMap struct {
-	Pid int					`json:"pid"`
-	Ppid int				`json:"ppid"`
-	Pgrp int				`json:"pgrp"`
-	Uid int					`json:"uid"`
-	User string			`json:"user"`
-	State string		`json:"state"`
-	Slice string		`json:"slice"`
-	Unit string			`json:"unit"`
-	Comm string			`json:"comm"`
-	Cgroup string		`json:"cgroup"`
-	Priority int		`json:"priority"`
-	NumThreads int	`json:"num_threads"`
-	Runtime MainProperties	`json:"runtime"`
+	Pid        int         `json:"pid"`
+	Ppid       int         `json:"ppid"`
+	Pgrp       int         `json:"pgrp"`
+	Uid        int         `json:"uid"`
+	User       string      `json:"user"`
+	State      string      `json:"state"`
+	Slice      string      `json:"slice"`
+	Unit       string      `json:"unit"`
+	Comm       string      `json:"comm"`
+	Cgroup     string      `json:"cgroup"`
+	Priority   int         `json:"priority"`
+	NumThreads int         `json:"num_threads"`
+	Runtime    BaseProfile `json:"runtime"`
 }
 
 func NewProcMap(p *Proc) *ProcMap {
 	pm := &ProcMap{
-		Pid: p.Pid,
-		Ppid: p.Ppid,
-		Pgrp: p.Pgrp,
-		Uid: p.Uid,
-		User: p.Username(),
-		State: p.State,
-		Slice: p.Cgroup[1],
-		Unit: p.Cgroup[2],
-		Comm: p.Comm,
-		Cgroup: p.Cgroup[0],
-		Priority: p.Priority,
+		Pid:        p.Pid,
+		Ppid:       p.Ppid,
+		Pgrp:       p.Pgrp,
+		Uid:        p.Uid,
+		User:       p.Username(),
+		State:      p.State,
+		Slice:      p.Cgroup[1],
+		Unit:       p.Cgroup[2],
+		Comm:       p.Comm,
+		Cgroup:     p.Cgroup[0],
+		Priority:   p.Priority,
 		NumThreads: p.NumThreads,
-		Runtime: MainProperties{
-			Nice: p.Nice,
-			Sched: p.Sched(),
-			RTPrio: p.RTPrio,
-			IOClass: p.IOClass(),
-			IONice: p.IOPrioData,
+		Runtime: BaseProfile{
+			Nice:        p.Nice,
+			Sched:       p.Sched(),
+			RTPrio:      p.RTPrio,
+			IOClass:     p.IOClass(),
+			IONice:      p.IOPrioData,
 			OomScoreAdj: p.OomScoreAdj,
 		},
 	}
 	return pm
 }
 
-func (pm *ProcMap) GetStringMap() (result map[string]interface{}) {
-	if data, err := json.Marshal(*pm); err != nil {
-		panic(err)
-	} else if err := json.Unmarshal(data, &result); err != nil {
-		panic(err)
-	}
-	return
-}
-
-
 // ProcMapByPid implements sort.Interface for []*ProcMap based on Pid field
 type ProcMapByPid []*ProcMap
-func (s ProcMapByPid) Len() int { return len(s) }
-func (s ProcMapByPid) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+
+func (s ProcMapByPid) Len() int           { return len(s) }
+func (s ProcMapByPid) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s ProcMapByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
 
 // ProcMapByPgrp implements sort.Interface for []*ProcMap based on Pgrp field
 type ProcMapByPgrp []*ProcMap
-func (s ProcMapByPgrp) Len() int { return len(s) }
-func (s ProcMapByPgrp) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+
+func (s ProcMapByPgrp) Len() int           { return len(s) }
+func (s ProcMapByPgrp) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s ProcMapByPgrp) Less(i, j int) bool { return s[i].Pgrp < s[j].Pgrp }
 
 // FilteredProcMaps returns a slice of ProcMap for filtered processes.
-func FilteredProcMaps(filter Filterer) (result []*ProcMap, err error) {
-	var (
-		count = runtime.GOMAXPROCS(0)
-		wg sync.WaitGroup
-	)
+func FilteredProcMaps(filter ProcFilterer) (result []*ProcMap, err error) {
+	wg := getWaitGroup()
 	// prepare channels
 	stats := make(chan string, 8)
 	procmaps := make(chan *ProcMap, 8)
@@ -125,9 +129,9 @@ func FilteredProcMaps(filter Filterer) (result []*ProcMap, err error) {
 			result = append(result, procmap)
 		}
 	}()
-	for i := 0; i < count; i++ {
+	for i := 0; i < goMaxProcs; i++ {
 		wg.Add(1)
-		go func(){
+		go func() {
 			defer wg.Done()
 			var (
 				p *Proc

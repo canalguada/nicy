@@ -18,6 +18,8 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -31,27 +33,17 @@ var setCmd = &cobra.Command{
 The processes are selected when their group leader matches an existing rule.
 The --user option is the implied default, when none is given.
 Only superuser can run set command with --system, --global or --all option.`,
-	Args: cobra.MaximumNArgs(0),
+	Args:                  cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		fs := cmd.LocalNonPersistentFlags()
-		if err := checkConsistency(fs, cfgMap["scopes"]); err != nil {
-			return err
-		}
-		names := append(cfgMap["scopes"], "dry-run")
 		// Bind shared flags
-		bindFlags(cmd, names...)
-		return nil
+		return viper.BindPFlags(cmd.LocalNonPersistentFlags())
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		viper.Set("tag", "set")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		var scope = "user"
-		if value, ok := firstTrue(cfgMap["scopes"]); ok {
-			scope = value
-		}
 		if err := setCapabilities(true); err != nil {
 			cmd.PrintErrln(err)
 		}
@@ -60,52 +52,57 @@ Only superuser can run set command with --system, --global or --all option.`,
 				cmd.PrintErrln(err)
 			}
 		}()
-		// prepare channels
-		jobs := make(chan *ProcGroupJob, 8)
-		procs := make(chan []*Proc, 8)
-		// spin up workers
-		wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
-		for i := 0; i < (goMaxProcs + 1); i++ {
-			wg.Add(1) // run jobs
-			go func() {
-				defer wg.Done()
-				for job := range jobs {
-					job.Run("", cmd.OutOrStdout(), cmd.ErrOrStderr())
-				}
-			}()
-		}
-		wg.Add(1) // get jobs
-		go getGroupJobs(procs, jobs, &wg)
-		// send input
-		filter := GetFilterer(scope)
-		if viper.GetBool("verbose") {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Setting %v...\n", filter)
-		}
-		procs <- FilteredProcs(filter)
-		close(procs)
-		wg.Wait() // wait on the workers to finish
+		scope := GetStringFromFlags("user", viper.GetStringSlice("scopes")...)
+		filter := GetScopeOnlyFilterer(scope)
+		err := doSetCmd("", filter, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		fatal(wrap(err))
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(setCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// setCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
+	// Persistent flags
+	// Local flags
 	fs := setCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-
-	addDumpManageFlags(setCmd)
+	viper.Set("scopes", addScopeFlags(setCmd))
 	addDryRunFlag(setCmd)
-
+	// addVerboseFlag(setCmd)
 	setCmd.InheritedFlags().SortFlags = false
+}
+
+func doSetCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err error) {
+	// prepare channels
+	jobs := make(chan *ProcGroupJob, 8)
+	procs := make(chan []*Proc, 8)
+	// spin up workers
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	for i := 0; i < (goMaxProcs + 1); i++ {
+		wg.Add(1) // run jobs
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				err = job.Run("", stdout, stderr)
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+	wg.Add(1) // get jobs
+	go generateGroupJobs(procs, jobs, &wg)
+	// send input
+	// filter := GetScopeOnlyFilterer(scope)
+	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+		inform("", fmt.Sprintf("Setting %v...", filter))
+	}
+	procs <- FilteredProcs(filter)
+	close(procs)
+	wg.Wait() // wait on the workers to finish
+	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+		inform("", "Done.")
+	}
+	return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

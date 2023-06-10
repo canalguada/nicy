@@ -17,10 +17,11 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"io"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
 
 // runCmd represents the run command
 var runCmd = &cobra.Command{
@@ -32,31 +33,16 @@ The PRESET argument can be:
 - 'auto' to use some specific rule for the command, if available;
 - 'cgroup-only' to use only the cgroup properties of that rule, if any;
 - 'default' to use this special fallback preset;
--  any other generic type.
+-  any other generic profile.
 The CGROUP argument can be a cgroup defined in configuration files.
 The QUOTA argument can be an integer ranging from 1 to 99.
 It represents a percentage of the whole CPU time available, on all cores.`,
-	Args: cobra.MinimumNArgs(1),
+	Args:                  cobra.MinimumNArgs(1),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		var err error
 		fs := cmd.LocalNonPersistentFlags()
-		for _, slice := range [3][]string{
-			[]string{"quiet", "verbose"},
-			[]string{"preset", "default", "cgroup-only"},
-			[]string{"cgroup", "cpu"},
-		} {
-			err = checkConsistency(fs, slice)
-			if err != nil {
-				return err
-			}
-		}
 		// Bind shared flags
-		bindFlags(
-			cmd,
-			"dry-run", "quiet", "verbose", "preset", "default",
-			"cgroup-only", "cgroup", "cpu", "managed", "force-cgroup",
-		)
+		err := viper.BindPFlags(fs)
 		// Set runtime values where needed
 		switch {
 		case fs.Changed("default"):
@@ -65,9 +51,9 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 			viper.Set("preset", "cgroup-only")
 		}
 		if fs.Changed("cpu") {
-			viper.Set("cgroup", "cpu" + viper.GetString("cpu"))
+			viper.Set("cgroup", "cpu"+viper.GetString("cpu"))
 		}
-		return nil
+		return err
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		viper.Set("tag", "run")
@@ -82,32 +68,48 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 				cmd.PrintErrln(err)
 			}
 		}()
-		if err := runCommand("", args, nil, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
-			cmd.PrintErrln(err)
-		}
+		err := doRunCmd("", args, nil, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		fatal(wrap(err))
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(runCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// runCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
+	// Persistent flags
+	// Local flags
 	fs := runCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-
-	addRunShowFlags(runCmd)
+	addJobFlags(runCmd)
 	addDryRunFlag(runCmd)
-	addVerboseFlag(runCmd)
-
+	// addVerboseFlag(runCmd)
 	runCmd.InheritedFlags().SortFlags = false
+}
+
+func doRunCmd(tag string, command []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
+	cmd, args, err := splitCommand(command)
+	if err != nil {
+		return
+	}
+	// prepare channels
+	jobs := make(chan *ProcJob, 2)
+	inputs := make(chan *RunInput)
+	// spin up workers
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	wg.Add(1)            // run commands
+	go func() {
+		defer wg.Done()
+		for job := range jobs {
+			if err = job.Run(tag, args, stdin, stdout, stderr); err != nil {
+				return
+			}
+		}
+	}()
+	wg.Add(1) // get commands
+	go generateJobs(inputs, jobs, &wg)
+	inputs <- NewRunInput("/bin/sh", cmd) // send input
+	close(inputs)
+	wg.Wait() // wait on the workers to finish
+	return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

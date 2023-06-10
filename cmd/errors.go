@@ -17,33 +17,32 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"errors"
-	"encoding/json"
 	// "github.com/canalguada/nicy/jq"
 )
 
 // Error codes
 const (
-	SUCCESS = 0
-	FAILURE = 1
-	EPARSE = 2
+	SUCCESS  = 0
+	FAILURE  = 1
+	EPARSE   = 2
 	ENOTCONF = 3
-	ENOTDIR = 4
-	EACCESS = 5
-	EINVAL = 6
+	ENOTDIR  = 4
+	EACCESS  = 5
+	EINVAL   = 6
 	EALREADY = 16
 	// EUSAGE = 66
 	// ECOMPILE = 67
-	EPERM = 126
+	EPERM     = 126
 	ENOTFOUND = 127
 )
 
-
 type customError struct {
-	msg string
+	msg  string
 	Code int
 }
 
@@ -52,15 +51,15 @@ func (e customError) Error() string {
 }
 
 var (
-	ErrFailure = customError{"fail", FAILURE}
-	ErrParse = customError{"cannot parse options", EPARSE}
-	ErrNotConfDir = customError{"unknown directory", ENOTCONF}
-	ErrNotDir = customError{"not a directory", ENOTDIR}
+	ErrFailure        = customError{"fail", FAILURE}
+	ErrParse          = customError{"cannot parse options", EPARSE}
+	ErrNotConfDir     = customError{"unknown directory", ENOTCONF}
+	ErrNotDir         = customError{"not a directory", ENOTDIR}
 	ErrNotWritableDir = customError{"not writable directory", EACCESS}
-	ErrInvalid = customError{"invalid argument", EINVAL}
-	ErrAlready = customError{"already running", EALREADY}
-	ErrPermission = customError{"permission denied", EPERM}
-	ErrNotFound = customError{"not found", ENOTFOUND}
+	ErrInvalid        = customError{"invalid argument", EINVAL}
+	ErrAlready        = customError{"already running", EALREADY}
+	ErrPermission     = customError{"permission denied", EPERM}
+	ErrNotFound       = customError{"not found", ENOTFOUND}
 	// ErrUsage = customError{"gojq usage", EUSAGE}
 	// ErrCompile = customError{"gojq compile", ECOMPILE}
 )
@@ -81,7 +80,7 @@ func fatal(e error) {
 
 func nonfatal(e error) bool {
 	if e != nil {
-		warn(e)
+		inform("warning", e.Error())
 		return false
 	}
 	return true

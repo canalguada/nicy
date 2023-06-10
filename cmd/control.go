@@ -17,10 +17,16 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
+	"os/signal"
 	"time"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/sys/unix"
 )
 
 // controlCmd represents the control command
@@ -32,31 +38,24 @@ var controlCmd = &cobra.Command{
 The processes are selected when their group leader matches an existing rule.
 The --user option is the implied default, when none is given.
 Only superuser can fully run manage command with --system, --global or --all option.`,
-	Args: cobra.MaximumNArgs(0),
+	Args:                  cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		fs := cmd.LocalNonPersistentFlags()
-		if err := checkConsistency(fs, cfgMap["scopes"]); err != nil {
-			return err
-		}
-		names := append(cfgMap["scopes"], "dry-run", "tick")
 		// Bind shared flags
-		bindFlags(cmd, names...)
-		if tick := viper.GetDuration("tick"); tick.Seconds() < 5 || tick.Seconds() > 3600 {
-			msg := fmt.Sprintf("must range from 5s to 1h, got %v", tick)
+		err := viper.BindPFlags(fs)
+		if tick := viper.GetDuration("tick"); tick.Seconds() < 2 || tick.Seconds() > 3600 {
+			msg := fmt.Sprintf("must range from 2s to 1h, got %v", tick)
 			return fmt.Errorf("%w: %s", ErrParse, msg)
 		}
-		return nil
+		return err
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		viper.Set("tag", "control")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		var scope = "user"
-		if value, ok := firstTrue(cfgMap["scopes"]); ok {
-			scope = value
-		}
+		scope := GetStringFromFlags("user", viper.GetStringSlice("scopes")...)
 		if err := setCapabilities(true); err != nil {
 			cmd.PrintErrln(err)
 		}
@@ -65,35 +64,100 @@ Only superuser can fully run manage command with --system, --global or --all opt
 				cmd.PrintErrln(err)
 			}
 		}()
-		err := controlCommand(
-			"",
-			GetFilterer(scope),
-			cmd.OutOrStdout(), cmd.ErrOrStderr(),
-		)
+		filter := GetScopeOnlyFilterer(scope)
+		err := doControlCmd("", filter, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		fatal(wrap(err))
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(controlCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// controlCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
+	// Persistent flags
+	// Local flags
 	fs := controlCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-
-	addDumpManageFlags(controlCmd)
+	viper.Set("scopes", addScopeFlags(controlCmd))
 	addDryRunFlag(controlCmd)
-	fs.DurationP("tick", "t", 5 * time.Second, "delay between consecutive runs in seconds")
-
+	fs.DurationP("tick", "t", 5*time.Second, "delay between consecutive runs in seconds")
 	controlCmd.InheritedFlags().SortFlags = false
+}
+
+func doControlCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err error) {
+	// prepare channels
+	runjobs := make(chan *ProcGroupJob, 8)
+	procs := make(chan []*Proc, 8)
+	// and signal
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, unix.SIGUSR1)
+	ticker := time.NewTicker(viper.GetDuration("tick"))
+	defer func() {
+		signal.Stop(signalChan)
+		ticker.Stop()
+		cancel()
+	}()
+	// spin up workers
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	for i := 0; i < (goMaxProcs + 1); i++ {
+		wg.Add(1) // run jobs
+		go func() {
+			defer wg.Done()
+			for job := range runjobs {
+				err = job.Run(tag, stdout, stderr)
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+	wg.Add(1) // get jobs
+	go generateGroupJobs(procs, runjobs, &wg)
+	// send input
+	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+		inform("", fmt.Sprintf("Setting %v every %v...", filter, viper.GetDuration("tick")))
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case s := <-signalChan:
+				switch s {
+				case unix.SIGUSR1:
+					// TODO: Reload cache here
+					if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+						inform("", "Reloading cache...")
+						presetCache.LoadFromConfig()
+						inform("", "Cache reloaded.")
+					}
+				case os.Interrupt:
+					cancel()
+					os.Exit(1)
+				}
+			case <-ctx.Done():
+				if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+					inform("", "Done.")
+				}
+				break
+				// os.Exit(0)
+			}
+		}
+	}()
+	procs <- FilteredProcs(filter)
+	for {
+		select {
+		case <-ctx.Done():
+			break
+			// close(output)
+			// return
+		case <-ticker.C:
+			procs <- FilteredProcs(filter)
+		}
+	}
+	close(procs)
+	wg.Wait() // wait on the workers to finish
+	return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

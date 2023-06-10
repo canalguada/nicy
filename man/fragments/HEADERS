@@ -1,7 +1,0 @@
-\" Process this file with
-.\" groff -man -Tutf8 nicy.1
-.\"
-.\" vim: set ft=nroff fdm=marker
-.TH NICY 1 "June 2021" "nicy %version%" "General Commands Manual"
-.SH NAME
-nicy \- set the execution environment and configure the resources that spawned and running processes are allowed to share

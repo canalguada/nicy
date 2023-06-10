@@ -1,11 +1,9 @@
+---
 # Set user, if any, then global directories for configuration files
 # confdirs:
-# - "~/.config/nicy"
-# - "/usr/local/etc/nicy"
-# - "/etc/nicy"
-
-# Set nicy read-only library directory
-# libdir: "/usr/lib/nicy"
+#   - "~/.config/nicy"
+#   - "/usr/local/etc/nicy"
+#   - "/etc/nicy"
 
 # Show what command is launched and some more information from systemd-run
 # verbose: false
@@ -16,13 +14,514 @@
 # Use this command when root-credentials are required
 # sudo: "sudo"
 
-# Use this path to install scripts
-# scripts: "~/bin/nicy"
-# Superuser
-# scripts: "/usr/local/bin/nicy"
+# scripts:
+  # Use this path to install scripts
+  # Non privilegied user
+  # location: "~/bin/nicy"
+  # Superuser
+  # location: "/usr/local/bin/nicy"
+  # Ignore the commands listed when installing the scripts
+  # ignore: "/home/canalguada/.config/nicy/ignore"
+  # Symlink the commands listed after installing the scripts
+  # symlink: "/home/canalguada/.config/nicy/symlink"
 
-# Ignore the commands listed in this file when installing scripts
-# ignore: "~/.config/nicy/ignore"
-
-# Symlink the scripts of the corresponding commands listed in this file after installing them
-# symlink: "~/.config/nicy/symlink"
+presets:
+  # Allow to group tasks under a systemd slice that limit CPU usage
+  # N% is a mean for all cores, not the whole percentage as passed
+  # to systemd-run
+  cgroups:
+    cpu8:
+      CPUQuota: 8%
+    cpu16:
+      CPUQuota: 16%
+    cpu25:
+      CPUQuota: 25%
+    cpu33:
+      CPUQuota: 33%
+    cpu50:
+      CPUQuota: 50%
+    cpu66:
+      CPUQuota: 66%
+    cpu75:
+      CPUQuota: 75%
+    cpu80:
+      CPUQuota: 80%
+    cpu90:
+      CPUQuota: 90%
+  appgroups:
+    # Fallback values
+    default:
+      profile:
+        ioclass: idle
+        ioweight: 10
+        nice: 19
+    none:
+      assignments:
+        - elinks
+        - konsole
+        - lightdm
+        - plasmashell
+        - thrash-protect
+        - tmux
+        - vim
+        - vim.gtk3
+        - wineserver
+    # Use more CPU time if possible
+    # Games do not always need more IO, but in most cases can be hungry for CPU
+    Game:
+      profile:
+        ioclass: best-effort
+        nice: -5
+    # Try to add more CPU power to decrease latency/lags
+    # Try to add real time io for avoiding lags
+    Player-Audio:
+      assignments:
+        - ario
+        - audacious
+        - clementine
+        - clementine-tagreader
+        - cmus
+        - deadbeef-gtkui
+        - mopidy
+        - mpd
+        - ncmcpp
+        - ncmpcpp
+        - pyradio
+        - qmmp
+        - rhythmbox
+        - spotify
+      profile:
+        ioclass: realtime
+        nice: -5
+    Player-Video:
+      assignments:
+        - QtWebEngineProcess
+        - SVPManager
+        - acestream-launcher
+        - acestream-player
+        - acestreamengine
+        - celluloid
+        - mplayer
+        - mpv
+        - plexmediaplayer
+        - smplayer
+        - sopcast-player
+        - sopcast-player.py
+        - stremio
+        - totem
+        - vlc
+      profile:
+        ioclass: realtime
+        nice: -5
+    # Must have more CPU/IO time, but not so much as other apps
+    Image-View:
+      assignments:
+        - eog
+        - feh
+        - mirage
+        - qimgv
+        - shotwell
+        - shutter
+      profile:
+        cgroup: cpu80
+        nice: -3
+    Doc-View:
+      assignments:
+        - FoxitReader
+        - alacritty
+        - calibre
+        - code
+        - codium
+        - dnsmasq
+        - doublecmd
+        - ebook-viewer
+        - evince
+        - gitg
+        - gitkraken
+        - gpicview
+        - guake
+        - gwenview
+        - keepassxc
+        - kitty
+        - lrfviewer
+        - nacl_helper
+        - nvim
+        - nvim-qt
+        - okular
+        - oosplash
+        - plugin_host
+        - quiterss
+        - soffice.bin
+        - soulseekqt
+        - st
+        - subl3
+        - sublime-text
+        - sublime_merge
+        - sublime_text
+        - tig
+        - tilix
+        - wayst
+        - xviewer
+      profile:
+        cgroup: cpu80
+        nice: -3
+    # Low Latency Realtime Apps
+    # In general case not so heavy, but must not lag
+    LowLatency_RT:
+      assignments:
+        - BitwigStudioEngine
+        - Xorg
+        - audacity
+        - awesome
+        - bitwig-studio
+        - blender
+        - bspwm
+        - compton
+        - ffmpeg
+        - fluxbox
+        - gimp
+        - i3
+        - inkscape
+        - krita
+        - krunner
+        - kwin_x11
+        - linphon
+        - mixxx
+        - parsecd
+        - picom
+        - pulseaudio
+        - remote-viewer
+        - riot-web
+        - rstudio
+        - smbd
+        - spectrwm
+        - sway
+        - weston
+        - xfce4-appfinder
+        - xfce4-notifyd
+        - xfce4-session
+        - xfconfd
+        - xfsettingsd
+        - xfwm4
+        - xmobar
+        - xmonad-x86_64-linux
+      profile:
+        ioclass: realtime
+        nice: -10
+    # Background CPU/IO when load is needed, but it must be
+    # as silent as possible
+    BG_CPUIO:
+      assignments:
+        - 7z
+        - R
+        - SABnzbd.py
+        - ShaderCompileWorker
+        - UE4Editor
+        - UnrealLightmass
+        - UnrealPak
+        - alarm-clock
+        - amule
+        - apt
+        - apt-cache
+        - apt-file
+        - apt-get
+        - aptitude
+        - aria2c
+        - ark
+        - baloo_file
+        - baobab
+        - bees
+        - bleachbit
+        - blueberry-tray
+        - blueman-applet
+        - borg
+        - bzip2
+        - cat
+        - cksum
+        - clamd
+        - collectd
+        - comm
+        - cups-browsed
+        - cupsd
+        - curl
+        - dd
+        - deluge
+        - deluged
+        - df
+        - dpkg
+        - dropbox
+        - du
+        - duperemove
+        - fail2ban-server
+        - fdupes
+        - file-roller
+        - filelight
+        - g++
+        - gcc
+        - gerbera
+        - ghb
+        - go
+        - godoc
+        - gzip
+        - htop
+        - install
+        - insync
+        - join
+        - kbfsfuse
+        - kdeconnect-indicator
+        - kdeconnectd
+        - kget
+        - ktorrent
+        - kupfer
+        - lz4
+        - lzma
+        - lzop
+        - mailsync
+        - mailsync.bin
+        - make
+        - makepkg
+        - mbsync
+        - md5sum
+        - mednaffe
+        - megasync
+        - meld
+        - melt
+        - mkdir
+        - mkinitcpio
+        - mv
+        - newsboat
+        - nextcloud
+        - ninja
+        - node
+        - nvdock
+        - owncloud
+        - pacman
+        - polybar
+        - psensor
+        - qbittorrent
+        - qbittorrent-nox
+        - rclone
+        - recollindex
+        - redshift
+        - restic
+        - rm
+        - rmdir
+        - rmlint
+        - rsession
+        - rsync
+        - rtorrent
+        - sha1sum
+        - sha256sum
+        - sha384sum
+        - sha512sum
+        - shred
+        - smartd
+        - sort
+        - ssh-agent
+        - sum
+        - syncthing
+        - syncthing-gtk
+        - systemd-timesyncd
+        - tac
+        - tee
+        - tixati
+        - tor
+        - transgui
+        - transmission-cli
+        - transmission-daemon
+        - transmission-gtk
+        - transmission-qt
+        - transmission-remote
+        - unison
+        - wc
+        - wget
+        - xarchiver
+        - xz
+        - yay
+        - youtube-dl
+        - zstd
+      profile:
+        cgroup: cpu33
+        ioclass: idle
+        nice: 19
+        sched: idle
+    # Must work fast enough but must not create so much noise
+    Heavy_CPU:
+      assignments:
+        - FAHClient
+        - apache2
+        - boinc
+        - cmake
+        - convert
+        - dupeguru
+        - goldendict
+        - montage
+        - mysqld
+        - php-cgi7.0
+        - php-cgi7.1
+        - php-cgi7.2
+        - php-cgi7.3
+        - qemu-system-x86_64
+        - soundkonverter
+        - vmware
+        - vmware-vmx
+      profile:
+        cgroup: cpu66
+        ioclass: best-effort
+        ionice: 7
+        nice: 19
+    Chat:
+      assignments:
+        - Discord
+        - franz
+        - hexchat
+        - mailspring
+        - qtox
+        - rambox
+        - skypeforlinux
+        - slack
+        - teams
+        - telegram-desktop
+        - telegram-desktop.bin
+        - thunderbird
+        - viber
+        - vk
+        - weechat
+      profile:
+        ioclass: best-effort
+        ionice: 7
+        nice: -1
+    # Adjust OOM score
+    OOM_KILL:
+      profile:
+        oom_score_adj: 1000
+    OOM_NO_KILL:
+      profile:
+        oom_score_adj: -1000
+    Web-Browser:
+      assignments:
+        - brave
+        - brave-browser
+        - brave-sandbox
+        - chrome
+        - chrome-sandbox
+        - chromium-snapshot
+        - chromium-snapshot-bin
+        - firefox
+        - firefox-bin
+        - firefox-developer-edition
+        - firefox-esr
+        - firefox-nightly
+        - firefox.real
+        - google-chrome-dev
+        - google-chrome-unstable
+        - icecat
+        - qutebrowser
+        - surf
+        - vivaldi-bin
+      profile:
+        cgroup: cpu80
+        ioclass: best-effort
+        ionice: 7
+        nice: -3
+        oom_score_adj: 1000
+    File-Manager:
+      assignments:
+        - dolphin
+        - mc
+        - nautilus
+        - pcmanfm
+        - pcmanfm-qt
+        - ranger
+      profile:
+        cgroup: cpu80
+        ioclass: best-effort
+        nice: -3
+    Desktop_UI:
+      profile:
+        nice: -1
+        ioclass: "best-effort"
+        ionice: 2
+      assignments:
+        - rofi
+        - gmrun
+        - copyq
+  rules:
+    Xorg:
+      ionice: 1
+    bees:
+      oom_score_adj: 1000
+    blender:
+      ioclass: realtime
+      nice: -10
+    elinks:
+      ioclass: best-effort
+      ionice: 7
+      nice: -3
+      oom_score_adj: 1000
+    gimp:
+      ioclass: realtime
+      nice: -10
+    go:
+      cgroup: cpu80
+    goldendict:
+      cgroup: cpu33
+    htop:
+      nice: 15
+    konsole:
+      cmdargs: ["--notransparency"]
+    lightdm:
+      ioclass: realtime
+      ionice: 4
+    linphon:
+      ioclass: realtime
+      nice: -15
+    mc:
+      cgroup: cpu33
+      env: {EDITOR: "nvim", VIEWER: "less"}
+    nvim:
+      cmdargs: ["--listen", "/tmp/nvimsocket"]
+      env: {SHELL: "/bin/bash"}
+    nvim-qt:
+      cmdargs: ["--nofork", "--nvim=/usr/bin/nvim"]
+      env: {SHELL: "/bin/bash"}
+    plasmashell:
+      nice: -1
+    polybar:
+      nice: 15
+    pulseaudio:
+      nice: -11
+      rtprio: 1
+      sched: rr
+    pyradio:
+      MemoryHigh: 10%
+    thrash-protect:
+      ioclass: realtime
+      nice: -12
+    tmux:
+      nice: -3
+    vim:
+      nice: -3
+    vim.gtk3:
+      nice: -3
+    wineserver:
+      nice: 19
+      sched: fifo
+    xfce4-appfinder:
+      ioclass: realtime
+      ionice: 4
+    xfce4-notifyd:
+      ioclass: realtime
+      ionice: 4
+    xfce4-session:
+      ioclass: realtime
+      ionice: 4
+    xfconfd:
+      ioclass: realtime
+      ionice: 4
+    xfsettingsd:
+      ioclass: realtime
+      ionice: 4
+    xfwm4:
+      ioclass: realtime
+      ionice: 4

@@ -17,81 +17,60 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 // dumpCmd represents the dump command
 var dumpCmd = &cobra.Command{
-	Use:   "dump [-u|-g|-s|-a] [-r|-j|-v]",
-	Short: "Dump processes information",
-	Long: `Dump information on the running processes`,
-	Args: cobra.MaximumNArgs(0),
+	Use:                   "dump [-u|-g|-s|-a] [-r|-j|-n] [-m]",
+	Short:                 "Dump processes information",
+	Long:                  `Dump information on the running processes`,
+	Args:                  cobra.MaximumNArgs(0),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		var slices = map[int][]string{
-			0: cfgMap["scopes"],
-			1: cfgMap["formats"],
-		}
-		fs := cmd.LocalNonPersistentFlags()
-		for key := range slices {
-			if err := checkConsistency(fs, slices[key]); err != nil {
-				return err
-			}
-		}
 		// Bind shared flags
-		names := append(cfgMap["scopes"], cfgMap["formats"]...)
-		bindFlags(cmd, names...)
-		return nil
+		return viper.BindPFlags(cmd.LocalNonPersistentFlags())
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
 		var (
-			scope = "user"
-			format = "string"
-		)
-		if value, ok := firstTrue(cfgMap["scopes"]); ok {
-			scope = value
-		}
-		if value, ok := firstTrue(cfgMap["formats"]); ok {
-			format = value
-		}
-		var (
-			filterer = GetFilterer(scope)
+			format    = GetStringFromFlags("string", viper.GetStringSlice("formats")...)
 			formatter = GetFormatter(format)
+			scope     = GetStringFromFlags("user", viper.GetStringSlice("scopes")...)
+			filterer  ProcFilterer
 		)
+		if viper.GetBool("manageable") {
+			filterer = GetFilterer(scope)
+		} else {
+			filterer = GetScopeOnlyFilterer(scope)
+		}
+		presetCache = GetPresetCache()
 		if viper.GetBool("verbose") {
-			cmd.PrintErrln("Dumping stats for", filterer.String() + "...")
+			// cmd.PrintErrln("Dumping stats for", filterer.String()+"...")
+			fmt.Fprintln(cmd.ErrOrStderr(), "Dumping stats for", filterer.String()+"...")
 		}
 		for _, p := range FilteredProcs(filterer) {
-			cmd.Println(formatter(p))
+			// cmd.Println(formatter(p))
+			fmt.Fprintln(cmd.OutOrStdout(), formatter(p))
 		}
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(dumpCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// dumpCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
+	// Persistent flags
+	// Local flags
 	fs := dumpCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-
-	addDumpManageFlags(dumpCmd)
-
-	fs.BoolP("raw", "r", false, "use raw format")
-	fs.BoolP("json", "j", false, "use json format")
-	fs.BoolP("values", "v", false, "use nicy format")
-
+	viper.Set("scopes", addScopeFlags(dumpCmd))
+	viper.Set("formats", addFormatFlags(dumpCmd))
+	fs.BoolP("manageable", "m", false, "only manageable processes")
+	// addVerboseFlag(dumpCmd)
 	dumpCmd.InheritedFlags().SortFlags = false
 }
 

@@ -18,10 +18,11 @@ package cmd
 
 import (
 	"os"
+	"strings"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
 
 // showCmd represents the show command
 var showCmd = &cobra.Command{
@@ -37,26 +38,12 @@ The PRESET argument can be:
 The CGROUP argument can be a cgroup defined in configuration files.
 The QUOTA argument can be an integer ranging from 1 to 99.
 It represents a percentage of the whole CPU time available, on all cores.`,
-	Args: cobra.MinimumNArgs(1),
+	Args:                  cobra.MinimumNArgs(1),
 	DisableFlagsInUseLine: true,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		var err error
 		fs := cmd.LocalNonPersistentFlags()
-		for _, slice := range [3][]string{
-			[]string{"preset", "default", "cgroup-only"},
-			[]string{"cgroup", "cpu"},
-		} {
-			err = checkConsistency(fs, slice)
-			if err != nil {
-				return err
-			}
-		}
 		// Bind shared flags
-		bindFlags(
-			cmd,
-			"quiet", "preset", "default",
-			"cgroup-only", "cgroup", "cpu", "managed", "force-cgroup",
-		)
+		err := viper.BindPFlags(fs)
 		// Set runtime values where needed
 		switch {
 		case fs.Changed("default"):
@@ -65,42 +52,60 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 			viper.Set("preset", "cgroup-only")
 		}
 		if fs.Changed("cpu") {
-			viper.Set("cgroup", "cpu" + viper.GetString("cpu"))
+			viper.Set("cgroup", "cpu"+viper.GetString("cpu"))
 		}
-		return nil
+		return err
 	},
 	Run: func(cmd *cobra.Command, args []string) {
 		viper.Set("tag", "show")
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		lines, err := showCommand(viper.GetString("shell"), args)
+		lines, err := doShowCmd(viper.GetString("shell"), args)
 		fatal(wrap(err))
 		cmd.SetOut(os.Stdout)
-		for _, line := range lines {
-			cmd.Println(line)
-		}
+		cmd.Println(strings.Join(lines, "\n"))
 	},
 }
 
 func init() {
-	// rootCmd.AddCommand(showCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// showCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
+	// Persistent flags
+	// Local flags
 	fs := showCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-
-	addRunShowFlags(showCmd)
-
+	addJobFlags(showCmd)
 	showCmd.InheritedFlags().SortFlags = false
+}
+
+func doShowCmd(shell string, command []string) (result []string, err error) {
+	cmd, _, err := splitCommand(command)
+	if err != nil {
+		return
+	}
+	// prepare channels
+	jobs := make(chan *ProcJob, 2)
+	inputs := make(chan *RunInput)
+	// spin up workers
+	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	wg.Add(1)            // get result
+	result = append(result, `#!`+shell)
+	go func() {
+		defer wg.Done()
+		for job := range jobs {
+			lines, err := job.Show()
+			if err != nil {
+				return
+			}
+			result = append(result, lines...)
+		}
+	}()
+	wg.Add(1) // get commands
+	go generateJobs(inputs, jobs, &wg)
+	inputs <- NewRunInput(shell, cmd) // send input
+	close(inputs)
+	wg.Wait() // wait on the workers to finish
+	return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

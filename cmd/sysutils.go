@@ -19,14 +19,14 @@ package cmd
 import (
 	"fmt"
 	"strings"
-	"runtime"
+
+	"github.com/spf13/viper"
 	"golang.org/x/sys/unix"
 	"kernel.org/pub/linux/libs/security/libcap/cap"
 )
 
-
 var (
-	effective []cap.Value
+	effective   []cap.Value
 	inheritable []cap.Value
 )
 
@@ -43,9 +43,9 @@ func rlimitNice() *unix.Rlimit {
 	return &rLimit
 }
 
-func numCPU() int {
-	return runtime.NumCPU()
-}
+// func numCPU() int {
+//   return runtime.NumCPU()
+// }
 
 func setDumpable() error {
 	attr, _ := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
@@ -58,7 +58,7 @@ func setDumpable() error {
 }
 
 func clearAllCapabilities() error {
-	if err:= cap.ResetAmbient(); err != nil {
+	if err := cap.ResetAmbient(); err != nil {
 		return fmt.Errorf("%w: unable to reset ambient bits: %v", ErrFailure, err)
 	}
 	c := cap.GetProc()
@@ -68,11 +68,11 @@ func clearAllCapabilities() error {
 	if err := c.SetProc(); err != nil {
 		return fmt.Errorf("%w: unable to update %q: %v", ErrFailure, c, err)
 	}
-	return setDumpable()
+	return nil
 }
 
 func getCapabilities() string {
-	c:= cap.GetProc()
+	c := cap.GetProc()
 	result := []string{fmt.Sprintf("caps: %s", c.String())}
 	var buf []string
 	for _, val := range effective {
@@ -116,6 +116,26 @@ func getAmbient() (enable bool) {
 	}
 	enable = true
 	return
+}
+
+func updatePrivileges(flags ...bool) error {
+	switch {
+	case len(flags) > 0 && flags[0]:
+		nonfatal(setAmbient(true))
+	default:
+		if len(flags) > 1 && flags[1] {
+			// clear capabilities in order to :
+			// - allow access to /proc/[pid] filesystem
+			// - do not propagate capabilities
+			// TODO: check "error: operation not permitted"
+			nonfatal(clearAllCapabilities())
+		} else {
+			nonfatal(setAmbient(false))
+		}
+		debug(getCapabilities())
+	}
+	viper.Set("ambient", getAmbient())
+	return setDumpable()
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:
