@@ -38,6 +38,7 @@ var dumpCmd = &cobra.Command{
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
+		presetCache = GetPresetCache() // get cache, once for all goroutines
 		var (
 			format    = GetStringFromFlags("string", viper.GetStringSlice("formats")...)
 			formatter = GetFormatter(format)
@@ -45,11 +46,10 @@ var dumpCmd = &cobra.Command{
 			filterer  ProcFilterer
 		)
 		if viper.GetBool("manageable") {
-			filterer = GetFilterer(scope)
+			filterer = presetCache.GetFilterer(scope)
 		} else {
 			filterer = GetScopeOnlyFilterer(scope)
 		}
-		presetCache = GetPresetCache()
 		if viper.GetBool("verbose") {
 			// cmd.PrintErrln("Dumping stats for", filterer.String()+"...")
 			fmt.Fprintln(cmd.ErrOrStderr(), "Dumping stats for", filterer.String()+"...")

@@ -136,6 +136,10 @@ func (r Rule) Keys() (string, string) {
 	return r.RuleKey, r.Origin
 }
 
+func (r Rule) Path() string {
+	return LookPath(r.RuleKey)
+}
+
 func (r Rule) String() string {
 	r.RuleKey, r.Origin = "", ""
 	return ToJson(r)

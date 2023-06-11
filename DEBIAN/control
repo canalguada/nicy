@@ -8,10 +8,10 @@ Maintainer: David GUADALUPE <guadalupe.david@gmail.com>
 Homepage: https://github.com/canalguada/nicy
 Description: control processes execution environment and available resources
  nicy can be used to ease the control upon the execution environment of the
- managed processes and to configure the resources available to them: with 
- renice, can alter their scheduling priority; with chrt, can set their 
+ managed processes and to configure the resources available to them: with
+ renice, can alter their scheduling priority; with chrt, can set their
  real-time scheduling attributes and with ionice their I/O scheduling class
- and priority; with choom, can adjust their Out-Of-Memory killer score 
+ and priority; with choom, can adjust their Out-Of-Memory killer score
  setting.
  .
  It can create and start a transient systemd scope unit and either run
@@ -22,4 +22,4 @@ Description: control processes execution environment and available resources
  environment variables and add command arguments.
  .
  The processes are managed by nicy applying them generic or specific presets
- stored in JSON format.
+ stored in YAML format.

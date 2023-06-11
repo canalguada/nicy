@@ -21,7 +21,6 @@ package procfs
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -79,7 +78,9 @@ type Proc struct {
 	ProcStat
 	Uid         int       `json:"uid"`
 	owner       user.User `json:"-"`
-	Cgroup      [3]string `json:"cgroup"`
+	Cgroup      string    `json:"cgroup"`
+	Slice       string    `json:"slice"`
+	Unit        string    `json:"unit"`
 	OomScoreAdj int       `json:"oom_score_adj"`
 	IOPrioClass int       `json:"ioprio_class"`
 	IOPrioData  int       `json:"ionice"`
@@ -97,9 +98,9 @@ func (p *Proc) setCgroup() (err error) {
 	if cgroup, err := GetCgroup(p.Pid); err == nil {
 		if cgroup != "0::/" {
 			parts := strings.Split(cgroup, `/`)
-			p.Cgroup = [3]string{cgroup, parts[1], parts[len(parts)-1]}
+			p.Cgroup, p.Slice, p.Unit = cgroup, parts[1], parts[len(parts)-1]
 		} else {
-			p.Cgroup = [3]string{"0::/", ``, ``}
+			p.Cgroup, p.Slice, p.Unit = "0::/", "", ""
 		}
 	}
 	return
@@ -158,18 +159,18 @@ func NewProcFromStat(stat string) (p *Proc, err error) {
 	return
 }
 
-func (p *Proc) GoString() string {
-	return "Proc" + fmt.Sprintf(
-		"{ProcStat: %s, Uid: %v, owner: %+v, Cgroup: %v, RTPrio: %v, Policy: %v, OomScoreAdj: %v, IOPrioData: %v, IOPrioClass: %v}",
-		p.ProcStat.GoString(), p.Uid, p.owner, p.Cgroup, p.RTPrio, p.Policy, p.OomScoreAdj, p.IOPrioData, p.IOPrioClass,
+func (p *Proc) entries() string {
+	return fmt.Sprintf("Uid: %v, owner: %+v, Cgroup: %v, Slice: %v, Unit: %v, RTPrio: %v, Policy: %v, OomScoreAdj: %v, IOPrioData: %v, IOPrioClass: %v",
+		p.Uid, p.owner, p.Cgroup, p.Slice, p.Unit, p.RTPrio, p.Policy, p.OomScoreAdj, p.IOPrioData, p.IOPrioClass,
 	)
 }
 
+func (p *Proc) GoString() string {
+	return "Proc" + fmt.Sprintf("{ProcStat: %s, %s}", p.ProcStat.GoString(), p.entries())
+}
+
 func (p *Proc) String() string {
-	return fmt.Sprintf(
-		"{ProcStat: %s, Uid: %v, owner: %+v, Cgroup: %v, RTPrio: %v, Policy: %v, OomScoreAdj: %v, IOPrioData: %v, IOPrioClass: %v}",
-		p.ProcStat.String(), p.Uid, p.owner, p.Cgroup, p.RTPrio, p.Policy, p.OomScoreAdj, p.IOPrioData, p.IOPrioClass,
-	)
+	return fmt.Sprintf("{ProcStat: %s, %s}", p.ProcStat.String(), p.entries())
 }
 
 func (p Proc) Json() (result string) {
@@ -191,7 +192,7 @@ func (p Proc) Raw() string {
 			p.Username(),
 			p.State,
 			p.Comm,
-			p.Cgroup[0],
+			p.Cgroup,
 			p.Priority,
 			p.Nice,
 			p.NumThreads,
@@ -233,10 +234,10 @@ func (p *Proc) Values() string {
 		p.Uid,
 		p.Username(),
 		p.State,
-		p.Cgroup[1],
-		p.Cgroup[2],
+		p.Slice,
+		p.Unit,
 		p.Comm,
-		p.Cgroup[0],
+		p.Cgroup,
 		p.Priority,
 		p.Nice,
 		p.NumThreads,
@@ -262,7 +263,7 @@ func (p *Proc) Username() string {
 }
 
 func (p *Proc) InUserSlice() bool {
-	return p.Cgroup[1] == "user.slice"
+	return p.Slice == "user.slice"
 }
 
 func (p *Proc) InSystemSlice() bool {
@@ -302,24 +303,21 @@ func (s ProcByPid) Less(i, j int) bool { return s[i].Pid < s[j].Pid }
 
 // FilteredProcs returns a slice of Proc for filtered processes.
 func FilteredProcs(filter Filterer[Proc]) (result []*Proc) {
-	files, _ := filepath.Glob("/proc/[0-9]*/stat")
-	size := len(files)
+	files, err := filepath.Glob("/proc/[0-9]*/stat")
+	if err != nil {
+		return
+	}
 	// make our channels for communicating work and results
-	stats := make(chan string, size)
-	procs := make(chan *Proc, size)
+	stats := make(chan string, len(files))
 	// spin up workers and use a sync.WaitGroup to indicate completion
-	var count = runtime.GOMAXPROCS(0)
 	var wg sync.WaitGroup
-	for i := 0; i < count; i++ {
+	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var p *Proc
-			var err error
 			for stat := range stats {
-				p, err = NewProcFromStat(stat)
-				if filter.Filter(p, err) {
-					procs <- p
+				if p, err := NewProcFromStat(stat); filter.Filter(p, err) {
+					result = append(result, p)
 				}
 			}
 		}()
@@ -329,23 +327,14 @@ func FilteredProcs(filter Filterer[Proc]) (result []*Proc) {
 	go func() {
 		defer wg.Done()
 		for _, file := range files {
-			data, err := ioutil.ReadFile(file)
-			if err == nil {
+			if data, err := os.ReadFile(file); err == nil {
 				stats <- string(data)
 			}
 		}
 		close(stats)
 	}()
-	// wait on the workers to finish and close the procs channel
-	// to signal downstream that all work is done
-	go func() {
-		defer close(procs)
-		wg.Wait()
-	}()
-	// collect result from procs channel
-	for p := range procs {
-		result = append(result, p)
-	}
+	// wait on the workers to finish
+	wg.Wait()
 	// sort by Pid
 	sort.Sort(ProcByPid(result))
 	return

@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -60,6 +61,7 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
+		presetCache = GetPresetCache() // get cache content, once for all goroutines
 		if err := setCapabilities(true); err != nil {
 			cmd.PrintErrln(err)
 		}
@@ -86,29 +88,18 @@ func init() {
 }
 
 func doRunCmd(tag string, command []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
-	cmd, args, err := splitCommand(command)
-	if err != nil {
-		return
+	c := NewCommand(command...)
+	viper.Set("pid", os.Getpid())
+	if job, args, err := c.RunJob("/bin/sh"); err == nil {
+		// spin up workers
+		wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+		wg.Add(1)            // run commands
+		go func() {
+			defer wg.Done()
+			err = job.Run(tag, args, stdin, stdout, stderr)
+		}()
+		wg.Wait() // wait on the workers to finish
 	}
-	// prepare channels
-	jobs := make(chan *ProcJob, 2)
-	inputs := make(chan *RunInput)
-	// spin up workers
-	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
-	wg.Add(1)            // run commands
-	go func() {
-		defer wg.Done()
-		for job := range jobs {
-			if err = job.Run(tag, args, stdin, stdout, stderr); err != nil {
-				return
-			}
-		}
-	}()
-	wg.Add(1) // get commands
-	go generateJobs(inputs, jobs, &wg)
-	inputs <- NewRunInput("/bin/sh", cmd) // send input
-	close(inputs)
-	wg.Wait() // wait on the workers to finish
 	return
 }
 

@@ -28,7 +28,7 @@ import (
 
 // listCmd represents the list command
 var listCmd = &cobra.Command{
-	Use:   "list [-n] [-f ORIGIN] CATEGORY",
+	Use:   "list [-n] [-o ORIGIN] CATEGORY",
 	Short: "List category content",
 	Long: `List the content of cgroups, profiles or rules CATEGORY
 
@@ -45,8 +45,8 @@ When filtering from ORIGIN, show otherwise removed duplicates.`,
 		if err := viper.BindPFlags(fs); err != nil {
 			return err
 		}
-		if fs.Changed("from") {
-			value := viper.GetString("from")
+		if fs.Changed("only") {
+			value := viper.GetString("only")
 			switch value {
 			case "vendor", "site", "user", "other":
 				return nil
@@ -61,18 +61,18 @@ When filtering from ORIGIN, show otherwise removed duplicates.`,
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
+		presetCache = GetPresetCache() // get cache content, once for all goroutines
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 8, 8, 0, '\t', 0)
 		// To update writer
 		// tw.Init(cmd.OutOrStdout(), 8, 8, 0, '\t', 0)
 		defer tw.Flush()
-		presetCache = GetPresetCache()
 		category := strings.TrimRight(args[0], "s")
 		var (
 			list []string
 			err  error
 		)
-		if viper.IsSet("from") {
-			list, err = presetCache.ListFrom(category, viper.GetString("from"))
+		if viper.IsSet("only") {
+			list, err = presetCache.ListFrom(category, viper.GetString("only"))
 		} else {
 			list, err = presetCache.List(category)
 		}
@@ -93,7 +93,7 @@ func init() {
 	fs := listCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-	fs.StringP("from", "f", "", "list only objects from `ORIGIN`")
+	fs.StringP("only", "o", "", "list only objects from `ORIGIN`")
 	fs.BoolP("no-headers", "n", false, "do not print headers")
 	listCmd.InheritedFlags().SortFlags = false
 }

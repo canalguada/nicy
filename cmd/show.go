@@ -26,7 +26,7 @@ import (
 
 // showCmd represents the show command
 var showCmd = &cobra.Command{
-	Use:   "show [-q] [-p PRESET|-d|-z] [-c CGROUP|--cpu QUOTA] [-m] [-u] COMMAND",
+	Use:   "show [-q] [-S SHELL] [-R] [-p PRESET|-d|-z] [-c CGROUP|--cpu QUOTA] [-m] [-u] COMMAND",
 	Short: "Show effective script for given command",
 	Long: `Show the effective script for the given COMMAND
 
@@ -54,6 +54,11 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 		if fs.Changed("cpu") {
 			viper.Set("cgroup", "cpu"+viper.GetString("cpu"))
 		}
+		if valid, err := ValidShell(viper.GetString("shell")); err != nil {
+			return err
+		} else {
+			viper.Set("shell", valid)
+		}
 		return err
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -61,7 +66,8 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
-		lines, err := doShowCmd(viper.GetString("shell"), args)
+		presetCache = GetPresetCache() // get cache content, once for all goroutines
+		lines, err := doShowCmd(args)
 		fatal(wrap(err))
 		cmd.SetOut(os.Stdout)
 		cmd.Println(strings.Join(lines, "\n"))
@@ -75,36 +81,23 @@ func init() {
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
 	addJobFlags(showCmd)
+	addScriptFlags(showCmd)
 	showCmd.InheritedFlags().SortFlags = false
 }
 
-func doShowCmd(shell string, command []string) (result []string, err error) {
-	cmd, _, err := splitCommand(command)
-	if err != nil {
-		return
+func doShowCmd(command []string) (result []string, err error) {
+	shell := viper.GetString("shell")
+	c := NewCommand(command...)
+	if job, _, err := c.RunJob(shell); err == nil {
+		// spin up workers
+		wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+		wg.Add(1)            // get result
+		go func() {
+			defer wg.Done()
+			result, err = job.Script(shell)
+		}()
+		wg.Wait() // wait on the workers to finish
 	}
-	// prepare channels
-	jobs := make(chan *ProcJob, 2)
-	inputs := make(chan *RunInput)
-	// spin up workers
-	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
-	wg.Add(1)            // get result
-	result = append(result, `#!`+shell)
-	go func() {
-		defer wg.Done()
-		for job := range jobs {
-			lines, err := job.Show()
-			if err != nil {
-				return
-			}
-			result = append(result, lines...)
-		}
-	}()
-	wg.Add(1) // get commands
-	go generateJobs(inputs, jobs, &wg)
-	inputs <- NewRunInput(shell, cmd) // send input
-	close(inputs)
-	wg.Wait() // wait on the workers to finish
 	return
 }
 

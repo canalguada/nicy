@@ -54,25 +54,11 @@ type Tokener interface {
 	Prepend(s ...string) Tokener
 	Content() []string
 	IsEmpty() bool
-	Index(pos int) (string, error)
+	Index(pos int) string
 	ShellCmd() string
 	String() string
 	WriteTo(dest io.Writer) (n int, err error)
 }
-
-// func Append[T Tokener](c *T, s ...string) {
-//   value := (*c).Append(s...)
-//   if value, ok := value.(T); ok {
-//     *c = value
-//   }
-// }
-
-// func Prepend[T Tokener](c *T, s ...string) {
-//   value := (*c).Prepend(s...)
-//   if value, ok := value.(T); ok {
-//     *c = value
-//   }
-// }
 
 type Tokens []string
 
@@ -102,12 +88,12 @@ func (t Tokens) IsEmpty() bool {
 	return len(t) == 0
 }
 
-func (t Tokens) Index(pos int) (result string, err error) {
+func (t Tokens) Index(pos int) (result string) {
 	if pos >= 0 && pos < len(t) {
 		result = t[pos]
 		return
 	}
-	err = fmt.Errorf("%w: not a valid index: %d", ErrInvalid, pos)
+	inform("warning", fmt.Errorf("%w: not a valid index: %d", ErrInvalid, pos).Error())
 	return
 }
 
@@ -125,7 +111,6 @@ func (t Tokens) WriteTo(dest io.Writer) (n int, err error) {
 }
 
 type Command struct {
-	// Line
 	Tokener
 	skipRuntime bool
 }
@@ -146,48 +131,42 @@ func (c Command) Copy() Tokener {
 	return Command{Tokener: Tokens(s), skipRuntime: c.skipRuntime}
 }
 
-func SudoCommand(shell string) Command {
-	var test string
-	switch shell {
-	case "/bin/sh":
-		test = "[ $( id -u ) -ne 0 ]"
-	case "/bin/bash":
-		test = "[ $UID -ne 0 ]"
-	case "/usr/bin/zsh":
-		test = "(( $UID ))"
+func userTest(shell string) string {
+	switch filepath.Base(shell) {
+	case "sh", "dash":
+		return "[ $( id -u ) -ne 0 ]"
+	case "bash":
+		return "[ $UID -ne 0 ]"
+	case "zsh":
+		return "(( $UID ))"
 	default:
-		test = "[ $( id -u ) -ne 0 ]"
+		return "[ $( id -u ) -ne 0 ]"
 	}
-	result := NewCommand(test + " && SUDO=$SUDO || unset SUDO")
+}
+
+func SudoCommand(shell string) Command {
+	replace := viper.GetString("sudo")
+	if len(replace) == 0 {
+		replace = "$SUDO"
+	}
+	result := NewCommand(userTest(shell) + " && SUDO=" + replace + " || unset SUDO")
 	result.skipRuntime = true
 	return result
 }
 
 func ManagerCommand(shell string) Command {
-	var test string
-	switch shell {
-	case "/bin/sh":
-		test = "[ $( id -u ) -ne 0 ]"
-	case "/bin/bash":
-		test = "[ $UID -ne 0 ]"
-	case "/usr/bin/zsh":
-		test = "(( $UID ))"
-	default:
-		test = "[ $( id -u ) -ne 0 ]"
-	}
-	result := NewCommand(test + " && user_or_system=--user || user_or_system=--system")
+	result := NewCommand(userTest(shell) + " && manager=user || manager=system")
 	result.skipRuntime = true
 	return result
 }
 
-func (c *Command) RequireSysCapability(uid int) (comm string, flag bool) {
+func (c *Command) RequireSysCapability() (comm string, flag bool) {
 	var pos int
-	if token, _ := c.Index(0); token == "$SUDO" {
+	if c.Index(0) == "$SUDO" {
 		pos = 1
 	}
 	// Set flag for given system utilies
-	token, _ := c.Index(pos)
-	comm = filepath.Base(token)
+	comm = filepath.Base(c.Index(pos))
 	switch comm {
 	case "renice", "chrt", "ionice", "choom":
 		flag = true
@@ -199,7 +178,7 @@ func (c *Command) Runtime(pid, uid int) Command {
 	var tokens []string
 	for _, token := range c.Content() {
 		switch {
-		case token == "${user_or_system}":
+		case token == "--${manager}":
 			if uid != 0 {
 				tokens = append(tokens, "--user")
 			} else {
@@ -354,11 +333,44 @@ func (c *Command) Exec(tag string) error {
 }
 
 func (c *Command) Run(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
-	token, _ := c.Index(0)
-	if token == "exec" {
+	if c.Index(0) == "exec" {
 		return c.Exec(tag)
 	}
 	return c.StartWait(tag, stdin, stdout, stderr)
+}
+
+func (c *Command) Split() (path string, args []string, err error) {
+	if c.skipRuntime || c.IsEmpty() {
+		err = fmt.Errorf("%w: no runnable command", ErrInvalid)
+		return
+	}
+	tokens := c.Content()
+	if path = LookPath(tokens[0]); len(path) > 0 {
+		if len(tokens) > 1 {
+			args = tokens[1:]
+		}
+		return
+	}
+	err = &exec.Error{tokens[0], exec.ErrNotFound}
+	return
+}
+
+func (c *Command) RunJob(shell string) (job *ProcJob, args []string, err error) {
+	var cmd string
+	if cmd, args, err = c.Split(); err != nil {
+		return
+	}
+	// prepare channels
+	jobs := make(chan *ProcJob, 2)
+	inputs := make(chan *Request)
+	// spin up workers
+	go presetCache.GenerateJobs(inputs, jobs, nil)
+	input := NewPathRequest(cmd, shell)
+	input.Proc = GetCalling()
+	inputs <- input // send input
+	close(inputs)
+	job = <-jobs // wait for result
+	return
 }
 
 type Script []Command

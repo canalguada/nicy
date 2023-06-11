@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -46,10 +47,17 @@ func init() {
 }
 
 type ProcJob struct {
-	ProcMap
-	Request  *RunInput `json:"request"`
+	*ProcMap
+	*Request `json:"request"`
 	Result   Rule      `json:"result"`
 	Commands []Command `json:"commands"`
+}
+
+func NewMapJob(m *ProcMap) *ProcJob {
+	name := strings.Split(m.Comm, `:`)[0]
+	r := NewRawRequest(name, fmt.Sprintf("%%%s%%", name), "/bin/sh")
+	r.Quiet = true
+	return &ProcJob{ProcMap: m, Request: r}
 }
 
 func (job *ProcJob) AddCommand(c Command) {
@@ -99,90 +107,54 @@ func (job *ProcJob) SetSudoIfRequired() {
 
 func (job *ProcJob) AdjustNice(pid, pgrp int) error {
 	if job.Result.HasNice() {
-		// c := renice(job.Result.Nice, pid, pgrp).Content()
-		// if job.IsPrivilegeRequired("nice") {
-		//   job.SetSudoIfRequired()
-		//   c = append([]string{"$SUDO"}, c...)
-		// }
-		// c = append(c, ">/dev/null")
-		// job.AddCommand(NewCommand(c...))
 		job.AddProfileCommand("nice", renice(job.Result.Nice, pid, pgrp).Content())
-		return nil
 	}
-	return fmt.Errorf("%w: cannot find entry: '%s'", ErrInvalid, "nice")
+	return nil
 }
 
 func (job *ProcJob) AdjustOomScoreAdj(pid int) error {
 	if job.Result.HasOomScoreAdj() {
-		// c := choom(job.Result.OomScoreAdj, pid).Content()
-		// if job.IsPrivilegeRequired("oom_score_adj") {
-		//   job.SetSudoIfRequired()
-		//   c = append([]string{"$SUDO"}, c...)
-		// }
-		// c = append(c, ">/dev/null")
-		// job.AddCommand(NewCommand(c...))
 		job.AddProfileCommand("oom_score_adj", choom(job.Result.OomScoreAdj, pid).Content())
-		return nil
 	}
-	return fmt.Errorf("%w: cannot find entry: '%s'", ErrInvalid, "oom_score_adj")
+	return nil
 }
 
 func (job *ProcJob) AdjustSchedRTPrio(pid int) error {
-	policy := strings.Split(job.Request.CPUSched, `:`)[0]
 	var sched string
 	var rtprio int
 	if job.Result.HasSched() {
 		sched = job.Result.Sched
 	}
 	if job.Result.HasRtprio() {
-		condition := (policy == "1") || (policy == "2")
-		condition = (len(sched) == 0) && condition
-		if (sched == "fifo") || (sched == "rr") || condition {
+		if policy := job.Request.Proc.Policy; (sched == "fifo") ||
+			(sched == "rr") || (len(sched) == 0 && (policy == 1 || policy == 2)) {
 			rtprio = job.Result.RTPrio
 		} else {
 			rtprio = -1
 		}
 	}
 	if len(sched) > 0 || rtprio != 0 {
-		// c := chrt(sched, rtprio, pid).Content()
-		// if job.IsPrivilegeRequired("sched") {
-		//   job.SetSudoIfRequired()
-		//   c = append([]string{"$SUDO"}, c...)
-		// }
-		// c = append(c, ">/dev/null")
-		// job.AddCommand(NewCommand(c...))
 		job.AddProfileCommand("sched", chrt(sched, rtprio, pid).Content())
-		return nil
 	}
-	return fmt.Errorf("%w: cannot find entry: 'sched', 'rtprio'", ErrInvalid)
+	return nil
 }
 
 func (job *ProcJob) AdjustIOClassIONice(pid, pgrp int) error {
-	policy := strings.Split(job.Request.IOSched, `:`)[0]
 	var class string
 	level := -1
 	if job.Result.HasIoclass() {
 		class = job.Result.IOClass
 	}
 	if job.Result.HasIonice() {
-		condition := (policy == "1") || (policy == "2")
-		condition = (len(class) == 0) && condition
-		if (class == "realtime") || (class == "best-effort") || condition {
+		if policy := job.Request.Proc.IOPrioClass; (class == "realtime") ||
+			(class == "best-effort") || (len(class) == 0 && (policy == 1 || policy == 2)) {
 			level = job.Result.IONice
 		}
 	}
 	if len(class) > 0 || level != -1 {
-		// c := ionice(class, level, pid, pgrp).Content()
-		// if job.IsPrivilegeRequired("ioclass") {
-		//   job.SetSudoIfRequired()
-		//   c = append([]string{"$SUDO"}, c...)
-		// }
-		// c = append(c, ">/dev/null")
-		// job.AddCommand(NewCommand(c...))
 		job.AddProfileCommand("ioclass", ionice(class, level, pid, pgrp).Content())
-		return nil
 	}
-	return fmt.Errorf("%w: cannot find entry: 'ioclass', 'ionice'", ErrInvalid)
+	return nil
 }
 
 func (job *ProcJob) getEnvironment() (result []string) {
@@ -202,40 +174,40 @@ func (job *ProcJob) inCurrentUserSlice() bool {
 	reCallingUser = regexp.MustCompile(
 		`user-` + strconv.Itoa(os.Getuid()) + `\.slice`,
 	)
-	return reCallingUser.MatchString(job.Cgroup)
+	return reCallingUser.MatchString(job.ProcMap.Cgroup)
 }
 
 func (job *ProcJob) inUserSlice() bool {
-	return reUser.MatchString(job.Cgroup)
+	return reUser.MatchString(job.ProcMap.Cgroup)
 }
 
 func (job *ProcJob) inSessionScope() bool {
-	return reSession.MatchString(job.Cgroup)
+	return reSession.MatchString(job.ProcMap.Cgroup)
 }
 
 func (job *ProcJob) inManagedSlice() bool {
-	return reManaged.MatchString(job.Cgroup)
+	return reManaged.MatchString(job.ProcMap.Cgroup)
 }
 
 func (job *ProcJob) inSystemSlice() bool {
-	return reSystem.MatchString(job.Cgroup)
+	return reSystem.MatchString(job.ProcMap.Cgroup)
 }
 
 func (job *ProcJob) inAnyNicySlice() bool {
-	return reAnyNicy.MatchString(job.Cgroup)
+	return reAnyNicy.MatchString(job.ProcMap.Cgroup)
 }
 
 func (job *ProcJob) inProperSlice() bool {
 	if job.Result.HasCgroupKey() {
-		flag, _ := regexp.MatchString(job.sliceUnit(), job.Cgroup)
+		flag, _ := regexp.MatchString(job.sliceUnit(), job.ProcMap.Cgroup)
 		return flag
 	}
 	return true
 }
 
 func (job *ProcJob) manager() (result string) {
-	if job.Pid == 0 { // run command
-		result = "${user_or_system}"
+	if job.ProcMap.Pid == 0 { // run command
+		result = "--${manager}"
 	} else if job.inUserSlice() {
 		result = "--user"
 	} else {
@@ -245,7 +217,7 @@ func (job *ProcJob) manager() (result string) {
 }
 
 func (job *ProcJob) prefix() (result []string) {
-	if job.Pid == 0 || job.inCurrentUserSlice() {
+	if job.ProcMap.Pid == 0 || job.inCurrentUserSlice() {
 		return // run command or no privilege required
 		// only root is expected to manage processes outside his slice.
 	} else if job.inUserSlice() {
@@ -254,10 +226,10 @@ func (job *ProcJob) prefix() (result []string) {
 		if os.Getuid() != 0 {
 			result = append(result, "$SUDO")
 		}
-		path := fmt.Sprintf("/run/user/%d", job.Uid)
+		path := fmt.Sprintf("/run/user/%d", job.ProcMap.Uid)
 		result = append(
 			result,
-			"runuser", "-u", job.User, "--", "env",
+			"runuser", "-u", job.ProcMap.Username(), "--", "env",
 			fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus", path),
 			fmt.Sprintf("XDG_RUNTIME_DIR=%s", path),
 		)
@@ -268,25 +240,28 @@ func (job *ProcJob) prefix() (result []string) {
 	} else {
 		// Detected processes run inside default slices, using user or system
 		// manager as expected. You should not see this.
-		fatal(fmt.Errorf("%w: invalid cgroup: %s", ErrInvalid, job.Cgroup))
+		fatal(fmt.Errorf("%w: invalid cgroup: %s", ErrInvalid, job.ProcMap.Cgroup))
 	}
 	return
 }
 
 func (job *ProcJob) convertSliceProperties() (result []string) {
-	for _, property := range job.Result.SliceProperties {
-		// TODO: use Reduce
-		if value := strings.TrimPrefix(property, `CPUQuota=`); value != property {
-			v, err := strconv.Atoi(strings.TrimSuffix(value, `%`))
-			if err == nil {
-				value = fmt.Sprintf("%d%%", job.Request.NumCPU*v)
-			}
-			result = append(result, fmt.Sprintf("CPUQuota=%s", value))
-		} else {
-			result = append(result, property)
+	var runtimeCPUQuota = func(value string) string {
+		if v, err := strconv.Atoi(strings.TrimSuffix(value, `%`)); err == nil {
+			value = fmt.Sprintf("%d%%", job.Request.NumCPU*v)
 		}
+		return value
 	}
-	return
+	return Reduce(
+		job.Result.SliceProperties,
+		result,
+		func(r []string, property string) []string {
+			if value := strings.TrimPrefix(property, `CPUQuota=`); value != property {
+				property = fmt.Sprintf("CPUQuota=%s", runtimeCPUQuota(value))
+			}
+			return append(r, property)
+		},
+	)
 }
 func (job *ProcJob) startSliceUnit() (unit string) {
 	if !job.Result.HasCgroupKey() {
@@ -333,7 +308,7 @@ func (job *ProcJob) AddExecCmd() error {
 			quiet = "--quiet"
 		}
 		c = append(c,
-			"systemd-run", "${user_or_system}", "-G", "-d",
+			"systemd-run", "--${manager}", "-G", "-d",
 			"--no-ask-password", quiet, "--scope",
 			fmt.Sprintf("--unit=%s", job.unitPattern()),
 		)
@@ -373,10 +348,36 @@ func (job *ProcJob) PrepareCommands() error {
 }
 
 func (job *ProcJob) Show() (result []string, err error) {
-	c := job.Commands[len(job.Commands)-1].Content()
-	c = append(c, `"$@"`)
-	job.Commands[len(job.Commands)-1] = NewCommand(c...)
-	result = Map(job.Commands, func(c Command) string { return c.ShellCmd() })
+	if len(job.Commands) > 0 {
+		c := job.Commands[len(job.Commands)-1].Content()
+		c = append(c, `"$@"`)
+		job.Commands[len(job.Commands)-1] = NewCommand(c...)
+		result = Map(job.Commands, func(c Command) string { return c.ShellCmd() })
+		return
+	}
+	return nil, fmt.Errorf("%w: missing commands", ErrNotFound)
+}
+
+func (job *ProcJob) NicyExec() string {
+	return fmt.Sprintf(`exec nicy run -- %v "$@"`, job.Request.Path)
+}
+
+func (job *ProcJob) Script(shell string) (result []string, err error) {
+	lines, err := job.Show()
+	if err != nil {
+		return
+	}
+	result = append(result, "#!"+shell)
+	if viper.GetBool("run") {
+		result = append(
+			result,
+			"", "# With capabilities, no other permission is required",
+			"command -v nicy >/dev/null 2>&1 &&", "  "+job.NicyExec(),
+		)
+	}
+	result = append(result, "", "# May require sudo credentials")
+	result = append(result, lines...)
+	result = append(result, "", "# vim: set ft="+filepath.Base(shell))
 	return
 }
 
@@ -384,7 +385,7 @@ func (job *ProcJob) RuntimeCommands(args ...string) []Command {
 	return Reduce(([]Command)(job.Commands), []Command{}, func(s []Command, c Command) []Command {
 		if !c.skipRuntime { // Remove tests and shebang line from loop
 			// Append command args, if any, when required
-			if token, _ := c.Index(0); token == "exec" && len(args) > 0 {
+			if c.Index(0) == "exec" && len(args) > 0 {
 				c = NewCommand(append(c.Content(), args...)...)
 			}
 			s = append(s, c)
@@ -396,13 +397,13 @@ func (job *ProcJob) RuntimeCommands(args ...string) []Command {
 func (job *ProcJob) Run(tag string, args []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
 	commands := job.RuntimeCommands(args...)
 	// setup execution environment
-	uid := os.Getuid()
-	pid := os.Getpid()
+	uid := viper.GetInt("uid")
+	pid := viper.GetInt("pid")
 	nonfatal(updatePrivileges(true))
 	var unprivileged []Command
 	for _, c := range commands {
 		// run only lines that require some capabilities
-		_, flag := c.RequireSysCapability(job.Uid)
+		_, flag := c.RequireSysCapability()
 		if !(flag) {
 			if !(c.IsEmpty()) {
 				unprivileged = append(unprivileged, c)
@@ -420,7 +421,7 @@ func (job *ProcJob) Run(tag string, args []string, stdin io.Reader, stdout, stde
 	// finally adjust oom_score, prepare systemd slice and exec
 	for _, c := range unprivileged {
 		cToRun := c.Runtime(pid, uid)
-		if token, _ := cToRun.Index(0); token == "exec" {
+		if cToRun.Index(0) == "exec" {
 			return cToRun.Exec(tag)
 		} else {
 			err = cToRun.StartWait(tag, stdin, stdout, stderr)
@@ -452,12 +453,12 @@ func (job *ProcGroupJob) adjustProperties() error {
 	// second, using each ProcJob and its Pid
 	if job.Diff.HasSched() || job.Diff.HasRtprio() {
 		for i, _ := range job.Procs {
-			job.Procs[i].AdjustSchedRTPrio(job.Procs[i].Pid)
+			job.Procs[i].AdjustSchedRTPrio(job.Procs[i].ProcMap.Pid)
 		}
 	}
 	if job.Diff.HasOomScoreAdj() {
 		for i, _ := range job.Procs {
-			job.Procs[i].AdjustOomScoreAdj(job.Procs[i].Pid)
+			job.Procs[i].AdjustOomScoreAdj(job.Procs[i].ProcMap.Pid)
 		}
 	}
 	return nil
@@ -469,7 +470,7 @@ func (job *ProcGroupJob) scopeUnit() string {
 	if job.leader.Result.HasCgroupKey() {
 		tokens = append(tokens, job.leader.Result.CgroupKey)
 	}
-	tokens = append(tokens, fmt.Sprintf("%d", job.leader.Pid))
+	tokens = append(tokens, fmt.Sprintf("%d", job.leader.ProcMap.Pid))
 	return fmt.Sprintf("%s.scope", strings.Join(tokens, `-`))
 }
 
@@ -525,7 +526,7 @@ func (job *ProcGroupJob) adjustUnitProperties(properties []string) error {
 	prefix := job.leader.prefix()
 	c := []string{
 		"systemctl", job.leader.manager(), "--runtime",
-		"set-property", job.leader.Unit,
+		"set-property", job.leader.ProcMap.Unit,
 	}
 	if len(prefix) > 0 {
 		c = append(prefix, c...)
@@ -544,7 +545,7 @@ func (job *ProcGroupJob) PrepareAdjust() error {
 	}
 	job.adjustProperties()
 	// use process group leader to check cgroup
-	cgroup := job.leader.Cgroup
+	cgroup := job.leader.ProcMap.Cgroup
 	if reSession.MatchString(cgroup) {
 		// set processes running in some session scope
 		// check if require moving processes into own scope
@@ -595,11 +596,11 @@ func (job *ProcGroupJob) Run(tag string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	// Show job details
-	id := fmt.Sprintf("%s[%d]", job.leader.Comm, job.Pgrp)
+	id := fmt.Sprintf("%s[%d]", job.leader.ProcMap.Comm, job.Pgrp)
 	if viper.GetBool("verbose") || viper.GetBool("dry-run") {
 		inform(tag, fmt.Sprintf(
 			"%s: cgroup:%s pids:%v",
-			id, job.leader.Unit, job.Pids,
+			id, job.leader.ProcMap.Unit, job.Pids,
 		))
 	}
 	if viper.GetBool("verbose") && viper.GetBool("debug") {
@@ -613,7 +614,7 @@ func (job *ProcGroupJob) Run(tag string, stdout, stderr io.Writer) error {
 		if c.skipRuntime {
 			continue
 		}
-		_, flag := c.RequireSysCapability(job.leader.Uid)
+		_, flag := c.RequireSysCapability()
 		if !(flag) { // run only lines that require some capabilities
 			if !(c.IsEmpty()) {
 				unprivileged = append(unprivileged, c)
@@ -635,68 +636,22 @@ func (job *ProcGroupJob) Run(tag string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func ProcMapToProcJob(procmaps []*ProcMap) (result []*ProcJob) {
-	limit := int(rlimitNice().Max)
+func ProcMapToProcJob(procmaps []*ProcMap) []*ProcJob {
 	// sort first by Pgrp
 	sort.Sort(ProcMapByPgrp(procmaps))
-	for _, procmap := range procmaps {
-		name := strings.Split(procmap.Comm, `:`)[0]
-		job := &ProcJob{
-			ProcMap: *procmap,
-			Request: &RunInput{
-				Name:     name,
-				Path:     fmt.Sprintf("%%%s%%", name),
-				Preset:   "auto",
-				Quiet:    true,
-				Shell:    "/bin/sh",
-				NumCPU:   numCPU,
-				MaxNice:  limit,
-				CPUSched: "0:other:0",
-				IOSched:  "0:none:0",
-			},
-		}
-		result = append(result, job)
-	}
-	return
+	return Map(procmaps, NewMapJob)
 }
 
 func (job *ProcGroupJob) Add(p *ProcJob) (err error) {
-	if p.Pgrp == job.Pgrp {
-		job.Pids = append(job.Pids, p.Pid)
+	if p.ProcMap.Pgrp == job.Pgrp {
+		job.Pids = append(job.Pids, p.ProcMap.Pid)
 		job.Procs = append(job.Procs, p)
 		if len(job.Procs) == 1 {
 			job.leader = job.Procs[0]
 		}
 	} else {
-		err = fmt.Errorf("%w: wrong pgrp: %d", ErrInvalid, p.Pgrp)
+		err = fmt.Errorf("%w: wrong pgrp: %d", ErrInvalid, p.ProcMap.Pgrp)
 		warn(err)
-	}
-	return
-}
-
-func GroupProcJobs(jobs []*ProcJob) (result *ProcGroupJob, remainder []*ProcJob) {
-	if len(jobs) == 0 {
-		return
-	}
-	// sort content
-	sort.SliceStable(jobs, func(i, j int) bool {
-		return jobs[i].Pid < jobs[j].Pid
-	})
-	leader := jobs[0]
-	result = &ProcGroupJob{ // new group job
-		Pgrp:   leader.Pgrp,
-		Pids:   []int{leader.Pid},
-		Diff:   Rule{},
-		Procs:  []*ProcJob{leader},
-		leader: leader,
-	}
-	for _, job := range jobs[1:] { // add content
-		if job.Pgrp == result.Pgrp {
-			result.Pids = append(result.Pids, job.Pid)
-			result.Procs = append(result.Procs, job)
-		} else {
-			remainder = append(remainder, job)
-		}
 	}
 	return
 }
@@ -705,44 +660,8 @@ func (job *ProcGroupJob) LeaderInfo() (result string) {
 	if len(job.Procs) > 0 {
 		result = fmt.Sprintf(
 			"Group pgrp %d leader (%s)[%d]",
-			job.Pgrp, job.Procs[0].Comm, job.Procs[0].Pid,
+			job.Pgrp, job.Procs[0].ProcMap.Comm, job.Procs[0].ProcMap.Pid,
 		)
-	}
-	return
-}
-
-func ReviewGroupJobDiff(groupjob *ProcGroupJob) (count int, err error) {
-	if len(groupjob.Procs) == 0 {
-		return
-	}
-	leader := groupjob.leader // process group leader only
-	input := leader.Request
-	// get rule and set leader rule for reference
-	leader.Result = presetCache.GetRunInputRule(input)
-	running := Rule{
-		BaseProfile: leader.Runtime,
-	}
-	// review diff
-	groupjob.Diff, count = leader.Result.GetDiff(running)
-	// check cgroup: processes are easily movable when running inside
-	// session scope and some managed nicy slice
-	if groupjob.Diff.HasCgroupKey() {
-		if leader.inProperSlice() { // running yet inside proper cgroup
-			groupjob.Diff.CgroupKey = ""
-		} else if !(leader.inAnyNicySlice()) && !(leader.inSessionScope()) {
-			groupjob.Diff.CgroupKey = "" // remove cgroup from groupjob.Diff
-		}
-	} // end process group leader only
-	if viper.GetBool("debug") {
-		id := fmt.Sprintf("%s[%d]", leader.Comm, leader.Pgrp)
-		// info := groupjob.LeaderInfo()
-		for k, v := range map[string]map[string]any{
-			"preset":  ToInterface(leader.Result),
-			"runtime": ToInterface(running),
-			"diff":    ToInterface(groupjob.Diff),
-		} {
-			inform("", fmt.Sprintf("%s %s: %v", id, k, v))
-		}
 	}
 	return
 }

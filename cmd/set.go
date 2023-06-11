@@ -44,6 +44,7 @@ Only superuser can run set command with --system, --global or --all option.`,
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
+		presetCache = GetPresetCache() // get cache content, once for all goroutines
 		if err := setCapabilities(true); err != nil {
 			cmd.PrintErrln(err)
 		}
@@ -77,6 +78,16 @@ func doSetCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err er
 	procs := make(chan []*Proc, 8)
 	// spin up workers
 	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
+	// wg.Add(1)            // run jobs
+	// go func() {
+	//   defer wg.Done()
+	//   for job := range jobs {
+	//     err = job.Run("", stdout, stderr)
+	//     if err != nil {
+	//       return
+	//     }
+	//   }
+	// }()
 	for i := 0; i < (goMaxProcs + 1); i++ {
 		wg.Add(1) // run jobs
 		go func() {
@@ -90,7 +101,17 @@ func doSetCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err er
 		}()
 	}
 	wg.Add(1) // get jobs
-	go generateGroupJobs(procs, jobs, &wg)
+	go presetCache.GenerateGroupJobs(procs, jobs, &wg)
+
+	// groupjobs := make(chan *ProcGroupJob, 8)
+	// procmaps := make(chan []*ProcMap, 8)
+	// wg.Add(1) // prepare process group jobs adding commands
+	// go prepareGroupJobs(groupjobs, jobs, &wg)
+	// wg.Add(1) // split procmaps and build process group jobs
+	// go buildGroupJobs(procmaps, groupjobs, &wg)
+	// wg.Add(1) // filter procs and prepare procmaps
+	// go filterProcMaps(procs, procmaps, &wg)
+
 	// send input
 	// filter := GetScopeOnlyFilterer(scope)
 	if viper.GetBool("dry-run") || viper.GetBool("verbose") {

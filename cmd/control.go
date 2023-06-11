@@ -55,6 +55,7 @@ Only superuser can fully run manage command with --system, --global or --all opt
 		// Debug output
 		debugOutput(cmd)
 		// Real job goes here
+		presetCache = GetPresetCache() // get cache, once for all goroutines
 		scope := GetStringFromFlags("user", viper.GetStringSlice("scopes")...)
 		if err := setCapabilities(true); err != nil {
 			cmd.PrintErrln(err)
@@ -112,7 +113,7 @@ func doControlCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (er
 		}()
 	}
 	wg.Add(1) // get jobs
-	go generateGroupJobs(procs, runjobs, &wg)
+	go presetCache.GenerateGroupJobs(procs, runjobs, &wg)
 	// send input
 	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
 		inform("", fmt.Sprintf("Setting %v every %v...", filter, viper.GetDuration("tick")))

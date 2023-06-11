@@ -41,7 +41,6 @@ var buildCmd = &cobra.Command{
 		cacheFile := viper.GetString("cache")
 		presetCache = GetPresetCache()
 		if viper.GetBool("dump") {
-			// fmt.Printf("%#v\n", presetCache)
 			data, err := presetCache.GetContent()
 			fatal(wrap(err))
 			fmt.Fprintln(cmd.OutOrStdout(), string(data))
@@ -64,7 +63,7 @@ func init() {
 	fs := buildCmd.Flags()
 	fs.SortFlags = false
 	fs.SetInterspersed(false)
-	addCacheFlag(buildCmd)
+	// addCacheFlag(buildCmd)
 	fs.BoolP("dump", "d", false, "dump to stdout without saving")
 	buildCmd.InheritedFlags().SortFlags = false
 }
