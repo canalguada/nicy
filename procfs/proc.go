@@ -96,9 +96,8 @@ func (p *Proc) setUser() (err error) {
 
 func (p *Proc) setCgroup() (err error) {
 	if cgroup, err := GetCgroup(p.Pid); err == nil {
-		if cgroup != "0::/" {
-			parts := strings.Split(cgroup, `/`)
-			p.Cgroup, p.Slice, p.Unit = cgroup, parts[1], parts[len(parts)-1]
+		if parts := strings.Split(strings.TrimPrefix(cgroup, "0::/"), `/`); strings.HasPrefix(cgroup, "0::/") && len(parts) > 0 {
+			p.Cgroup, p.Slice, p.Unit = cgroup, parts[0], parts[len(parts)-1]
 		} else {
 			p.Cgroup, p.Slice, p.Unit = "0::/", "", ""
 		}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Nicy process scheduler control
+
+[Service]
+Type=simple
+Restart=on-failure
+ExecStart=nicy control -u -t 12s
+
+[Install]
+WantedBy=default.target

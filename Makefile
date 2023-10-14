@@ -3,8 +3,8 @@ DESTDIR		?=
 package		= nicy
 program		= nicy
 git_branch	= master
-version		= 0.2.0
-revision	= 4
+version		= 0.2.1
+revision	= 1
 release_dir	= build
 prefix		= /usr/local
 bindir		= $(prefix)/bin
@@ -16,6 +16,7 @@ SUDO		= $$([ $$UID -ne 0 ] && echo "sudo")
 
 .PHONY: build
 build:
+	cd cmd ; sed -i 's/version  = ".*"/version  = "$(version)"/' root.go
 	/usr/bin/go build -o $(program) -ldflags="-s" .
 
 .PHONY: capabilities
@@ -41,10 +42,12 @@ distclean:
 man:
 	cd man ; \
 	sed -e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
+		-e "s/date: .*$/date: $(LANG=C date +'%B %Y')/" \
 		$(program).1.md  | \
 	pandoc -s -f markdown -t man > $(program).1 ; gzip -9 -f $(program).1
 	cd man ; \
 	sed -e 's#%prefix%#$(prefix)#g' -e 's#%version%#$(version)#g' \
+		-e "s/date: .*$/date: $(LANG=C date +'%B %Y')/" \
 		$(program).5.md  | \
 	pandoc -s -f markdown -t man > $(program).5 ; gzip -9 -f $(program).5
 
