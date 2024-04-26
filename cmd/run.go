@@ -17,7 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -70,7 +69,7 @@ It represents a percentage of the whole CPU time available, on all cores.`,
 				cmd.PrintErrln(err)
 			}
 		}()
-		err := doRunCmd("", args, nil, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		err := doRunCmd("", args, &Streams{Stdin: nil, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
 		fatal(wrap(err))
 	},
 }
@@ -87,7 +86,7 @@ func init() {
 	runCmd.InheritedFlags().SortFlags = false
 }
 
-func doRunCmd(tag string, command []string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
+func doRunCmd(tag string, command []string, std *Streams) (err error) {
 	c := NewCommand(command...)
 	viper.Set("pid", os.Getpid())
 	if job, args, err := c.RunJob("/bin/sh"); err == nil {
@@ -96,7 +95,7 @@ func doRunCmd(tag string, command []string, stdin io.Reader, stdout, stderr io.W
 		wg.Add(1)            // run commands
 		go func() {
 			defer wg.Done()
-			err = job.Run(tag, args, stdin, stdout, stderr)
+			err = job.Run(tag, args, std)
 		}()
 		wg.Wait() // wait on the workers to finish
 	}

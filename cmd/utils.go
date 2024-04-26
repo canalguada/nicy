@@ -46,37 +46,16 @@ func getWaitGroup() (wg sync.WaitGroup) {
 	return
 }
 
-func Map[T, U any](s []T, f func(T) U) []U {
-	r := make([]U, len(s))
-	for i, v := range s {
-		r[i] = f(v)
-	}
-	return r
-}
-
-func Filter[T any](s []T, f func(T) bool) []T {
-	var r []T
-	for _, v := range s {
-		if f(v) {
-			r = append(r, v)
-		}
-	}
-	return r
-}
-
-func Reduce[T, U any](s []T, init U, f func(U, T) U) U {
-	r := init
-	for _, v := range s {
-		r = f(r, v)
-	}
-	return r
-}
-
 func ValidShell(shell string) (string, error) {
-	if path, err := exec.LookPath(shell); err != nil || !reIsShell.MatchString(shell) {
-		return shell, fmt.Errorf("%w: shell: %q", err, shell)
-	} else {
-		return path, nil
+	switch {
+	case !reIsShell.MatchString(shell):
+		return shell, fmt.Errorf("%w: shell: %q", ErrInvalid, shell)
+	default:
+		if path, err := exec.LookPath(shell); err == nil {
+			return path, nil
+		} else {
+			return shell, fmt.Errorf("%w: shell: %q", err, shell)
+		}
 	}
 }
 
@@ -86,13 +65,9 @@ func timestamp() string {
 	return fmt.Sprintf("%v", time.Now().Unix())
 }
 
-func getTempFile(dest, pattern string) (*os.File, error) {
-	file, err := os.CreateTemp(dest, pattern)
-	if err != nil {
-		return nil, err
-	}
-	return file, nil
-}
+// func getTempFile(dest, pattern string) (*os.File, error) {
+// 	return os.CreateTemp(dest, pattern)
+// }
 
 // Run and show commands
 
@@ -134,12 +109,12 @@ func (r *Request) MergeFlags() {
 	r.Quiet = viper.GetBool("quiet")
 }
 
-func NewRawRequest(name, path, shell string) *Request {
+func NewRequest(name, path, shell string) *Request {
 	return &Request{BaseRequest: NewBaseRequest(name, path, shell), Proc: &Proc{}}
 }
 
 func NewPathRequest(path, shell string) *Request {
-	r := NewRawRequest(filepath.Base(path), path, shell)
+	r := NewRequest(filepath.Base(path), path, shell)
 	r.Verbosity = 1
 	r.MergeFlags()
 	return r
@@ -148,10 +123,7 @@ func NewPathRequest(path, shell string) *Request {
 func removeFromPath(root string) error {
 	dirs := filepath.SplitList(os.Getenv("PATH"))
 	dirs = Filter(dirs, func(path string) bool {
-		if strings.HasPrefix(path, root) {
-			return false
-		}
-		return true
+		return !strings.HasPrefix(path, root)
 	})
 	return os.Setenv("PATH", strings.Join(dirs, ":"))
 }
@@ -190,32 +162,11 @@ func LookAll(file string) chan string {
 	return ch
 }
 
-func ChanFirst[T any](ch chan T, f func(T) bool) T {
-	for v := range ch {
-		if f(v) {
-			return v
-		}
-	}
-	return *new(T)
-}
-
-func ChanMapFilter[T, U any](in chan T, out chan U, f func(T) (U, bool)) {
-	for v := range in {
-		if result, ok := f(v); ok {
-			out <- result
-		}
-	}
-}
-
-func IsNicy(path string) bool {
-	return strings.HasPrefix(path, viper.GetString("scripts.location")) ||
-		strings.HasSuffix(path, "."+prog)
-}
-
 // LookPath looks for a valid executable file outside scripts location.
 func LookPath(file string) string {
 	return ChanFirst(LookAll(file), func(path string) bool {
-		return !IsNicy(path)
+		return !strings.HasPrefix(path, viper.GetString("scripts.location")) &&
+			!strings.HasSuffix(path, "."+prog)
 	})
 }
 

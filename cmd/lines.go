@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -10,104 +9,20 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kballard/go-shellquote"
 	"github.com/spf13/viper"
 	"golang.org/x/sys/unix"
 )
 
-func ShellJoin(words ...string) string {
-	return shellquote.Join(words...)
-}
-
-func ShellSplit(input string) (words []string, err error) {
-	return shellquote.Split(input)
-}
-
-func ShellQuote(words []string) (result []string) {
-	for _, word := range words {
-		// Bail out early for "simple" strings
-		if word != "" && !strings.ContainsAny(word, "\\'\"`${[|&;<>()~*?! \t\n") {
-			result = append(result, word)
-		} else {
-			var buf bytes.Buffer
-			buf.WriteString("'")
-			for i := 0; i < len(word); i++ {
-				b := word[i]
-				if b == '\'' {
-					// Replace literal ' with a close ', a \', and a open '
-					buf.WriteString("'\\''")
-				} else {
-					buf.WriteByte(b)
-				}
-			}
-			buf.WriteString("'")
-			result = append(result, buf.String())
-		}
+func whenVerbose(tag, path string, args ...string) {
+	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+		inform(tag, strings.Join(append([]string{path}, args...), ` `))
 	}
-	return
 }
 
-type Tokener interface {
-	Len() int
-	Copy() Tokener
-	Append(s ...string) Tokener
-	Prepend(s ...string) Tokener
-	Content() []string
-	IsEmpty() bool
-	Index(pos int) string
-	ShellCmd() string
-	String() string
-	WriteTo(dest io.Writer) (n int, err error)
-}
-
-type Tokens []string
-
-func (t Tokens) Len() int {
-	return len(t)
-}
-
-func (t Tokens) Copy() Tokener {
-	result := make([]string, len(t))
-	_ = copy(result, t)
-	return Tokens(result)
-}
-
-func (t Tokens) Append(s ...string) Tokener {
-	return append(t, s...)
-}
-
-func (t Tokens) Prepend(s ...string) Tokener {
-	return append(Tokens(s), t...)
-}
-
-func (t Tokens) Content() []string {
-	return ([]string)(t)
-}
-
-func (t Tokens) IsEmpty() bool {
-	return len(t) == 0
-}
-
-func (t Tokens) Index(pos int) (result string) {
-	if pos >= 0 && pos < len(t) {
-		result = t[pos]
-		return
-	}
-	inform("warning", fmt.Errorf("%w: not a valid index: %d", ErrInvalid, pos).Error())
-	return
-}
-
-func (t Tokens) ShellCmd() string {
-	return strings.TrimSpace(strings.Join(t, ` `))
-}
-
-func (t Tokens) String() string {
-	return `[` + t.ShellCmd() + `]`
-}
-
-func (t Tokens) WriteTo(dest io.Writer) (n int, err error) {
-	n, err = fmt.Fprintf(dest, t.ShellCmd()+"\n")
-	return
+type Streams struct {
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
 type Command struct {
@@ -119,59 +34,49 @@ func NewCommand(s ...string) Command {
 	return Command{Tokener: Tokens(s)}
 }
 
-func FromShellCmd(cmd string) Command {
-	s, err := ShellSplit(cmd)
-	fatal(wrap(err))
-	return NewCommand(s...)
-}
-
-func (c Command) Copy() Tokener {
-	s := make([]string, len(c.Content()))
-	_ = copy(s, c.Content())
-	return Command{Tokener: Tokens(s), skipRuntime: c.skipRuntime}
-}
-
-func userTest(shell string) string {
+func UserTernaryCommand(shell string, ok string, ko string) Command {
+	var condition string
 	switch filepath.Base(shell) {
 	case "sh", "dash":
-		return "[ $( id -u ) -ne 0 ]"
+		condition = "[ $( id -u ) -ne 0 ]"
 	case "bash":
-		return "[ $UID -ne 0 ]"
+		condition = "[ $UID -ne 0 ]"
 	case "zsh":
-		return "(( $UID ))"
+		condition = "(( $UID ))"
 	default:
-		return "[ $( id -u ) -ne 0 ]"
+		condition = "[ $( id -u ) -ne 0 ]"
 	}
+	result := NewCommand(fmt.Sprintf("%s && %s || %s", condition, ok, ko))
+	result.skipRuntime = true
+	return result
 }
-
 func SudoCommand(shell string) Command {
 	replace := viper.GetString("sudo")
 	if len(replace) == 0 {
 		replace = "$SUDO"
 	}
-	result := NewCommand(userTest(shell) + " && SUDO=" + replace + " || unset SUDO")
-	result.skipRuntime = true
-	return result
+	return UserTernaryCommand(shell, "SUDO="+replace, "unset SUDO")
 }
 
 func ManagerCommand(shell string) Command {
-	result := NewCommand(userTest(shell) + " && manager=user || manager=system")
-	result.skipRuntime = true
-	return result
+	return UserTernaryCommand(shell, "manager=user", "manager=system")
 }
 
-func (c *Command) RequireSysCapability() (comm string, flag bool) {
+func (c Command) Copy() Tokener {
+	return Command{Tokener: Tokens(Clone(c.Content())), skipRuntime: c.skipRuntime}
+}
+
+func (c *Command) RequireSysCapability() bool {
 	var pos int
 	if c.Index(0) == "$SUDO" {
 		pos = 1
 	}
 	// Set flag for given system utilies
-	comm = filepath.Base(c.Index(pos))
-	switch comm {
+	switch filepath.Base(c.Index(pos)) {
 	case "renice", "chrt", "ionice", "choom":
-		flag = true
+		return true
 	}
-	return
+	return false
 }
 
 func (c *Command) Runtime(pid, uid int) Command {
@@ -194,18 +99,10 @@ func (c *Command) Runtime(pid, uid int) Command {
 }
 
 func (c *Command) Output() (output []string, err error) {
-	data, err := exec.Command(c.Content()[0], c.Content()[1:]...).Output()
-	if err != nil {
-		return
+	if data, err := exec.Command(c.Content()[0], c.Content()[1:]...).Output(); err == nil {
+		output = strings.Split(string(data), "\n")
 	}
-	output = strings.Split(string(data), "\n")
 	return
-}
-
-type Streams struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
 }
 
 func (c *Command) Scan(std *Streams) Command {
@@ -214,7 +111,7 @@ func (c *Command) Scan(std *Streams) Command {
 		switch {
 		case strings.HasPrefix(token, ">") || strings.HasPrefix(token, "1>"):
 			arg := strings.TrimPrefix(token, "1>")
-			arg = strings.TrimPrefix(token, ">")
+			arg = strings.TrimPrefix(arg, ">")
 			arg = strings.TrimSpace(arg)
 			if arg == "/dev/null" {
 				std.Stdout = nil
@@ -225,11 +122,11 @@ func (c *Command) Scan(std *Streams) Command {
 				continue
 			}
 		case strings.HasPrefix(token, "2>"):
-			name := strings.TrimPrefix(token, "2>")
-			name = strings.TrimSpace(name)
-			if name == "/dev/null" {
+			arg := strings.TrimPrefix(token, "2>")
+			arg = strings.TrimSpace(arg)
+			if arg == "/dev/null" {
 				std.Stderr = nil
-			} else if name == "&2" {
+			} else if arg == "&1" {
 				std.Stderr = std.Stdout
 			} else {
 				warn(fmt.Errorf("%w: invalid redirection: %v", ErrInvalid, token))
@@ -256,12 +153,6 @@ func (c *Command) getCmd(std *Streams) (cmd *exec.Cmd, err error) {
 	return
 }
 
-func whenVerbose(tag, path string, args ...string) {
-	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
-		inform(tag, strings.Join(append([]string{path}, args...), ` `))
-	}
-}
-
 func (c *Command) preRun() (err error) {
 	tokens := c.Copy().Content()
 	if tokens[0] == "exec" {
@@ -282,12 +173,12 @@ func (c *Command) preRun() (err error) {
 	return
 }
 
-func (c *Command) Start(tag string, stdin io.Reader, stdout, stderr io.Writer) (cmd *exec.Cmd, err error) {
+func (c *Command) Start(tag string, std *Streams) (cmd *exec.Cmd, err error) {
 	if err = c.preRun(); err != nil {
 		return
 	}
 	// set command
-	if cmd, err = c.getCmd(&Streams{stdin, stdout, stderr}); err != nil {
+	if cmd, err = c.getCmd(std); err != nil {
 		return
 	}
 	whenVerbose(tag, cmd.Path, cmd.Args[1:]...)
@@ -300,9 +191,9 @@ func (c *Command) Start(tag string, stdin io.Reader, stdout, stderr io.Writer) (
 	return
 }
 
-func (c *Command) StartWait(tag string, stdin io.Reader, stdout, stderr io.Writer) (err error) {
+func (c *Command) StartWait(tag string, std *Streams) (err error) {
 	var cmd *exec.Cmd
-	if cmd, err = c.Start(tag, stdin, stdout, stderr); err != nil {
+	if cmd, err = c.Start(tag, std); err != nil {
 		return
 	}
 	// Return if dry-run
@@ -332,11 +223,11 @@ func (c *Command) Exec(tag string) error {
 	return unix.Exec(command, args, os.Environ())
 }
 
-func (c *Command) Run(tag string, stdin io.Reader, stdout, stderr io.Writer) error {
+func (c *Command) Run(tag string, std *Streams) error {
 	if c.Index(0) == "exec" {
 		return c.Exec(tag)
 	}
-	return c.StartWait(tag, stdin, stdout, stderr)
+	return c.StartWait(tag, std)
 }
 
 func (c *Command) Split() (path string, args []string, err error) {
@@ -351,7 +242,7 @@ func (c *Command) Split() (path string, args []string, err error) {
 		}
 		return
 	}
-	err = &exec.Error{tokens[0], exec.ErrNotFound}
+	err = &exec.Error{Name: tokens[0], Err: exec.ErrNotFound}
 	return
 }
 

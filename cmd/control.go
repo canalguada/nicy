@@ -19,7 +19,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"time"
@@ -66,7 +65,7 @@ Only superuser can fully run manage command with --system, --global or --all opt
 			}
 		}()
 		filter := GetScopeOnlyFilterer(scope)
-		err := doControlCmd("", filter, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		err := doControlCmd("", filter, &Streams{Stdin: nil, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
 		fatal(wrap(err))
 	},
 }
@@ -83,7 +82,7 @@ func init() {
 	controlCmd.InheritedFlags().SortFlags = false
 }
 
-func doControlCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err error) {
+func doControlCmd(tag string, filter ProcFilterer, std *Streams) (err error) {
 	// prepare channels
 	runjobs := make(chan *ProcGroupJob, 8)
 	procs := make(chan []*Proc, 8)
@@ -91,7 +90,7 @@ func doControlCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (er
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, unix.SIGUSR1)
+	signal.Notify(signalChan, os.Interrupt, unix.SIGUSR1, unix.SIGUSR2)
 	ticker := time.NewTicker(viper.GetDuration("tick"))
 	defer func() {
 		signal.Stop(signalChan)
@@ -102,15 +101,23 @@ func doControlCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (er
 	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 	for i := 0; i < (goMaxProcs + 1); i++ {
 		wg.Add(1) // run jobs
-		go func() {
+		go func(id int) {
 			defer wg.Done()
-			for job := range runjobs {
-				err = job.Run(tag, stdout, stderr)
-				if err != nil {
-					return
+			select {
+			case <-ctx.Done():
+				if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+					inform("", fmt.Sprintf("Goroutine #%d cancelled.", id))
+				}
+				return
+			default:
+				for job := range runjobs {
+					err = job.Run(tag, std)
+					if err != nil {
+						return
+					}
 				}
 			}
-		}()
+		}(i)
 	}
 	wg.Add(1) // get jobs
 	go presetCache.GenerateGroupJobs(procs, runjobs, &wg)
@@ -118,47 +125,46 @@ func doControlCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (er
 	if viper.GetBool("dry-run") || viper.GetBool("verbose") {
 		inform("", fmt.Sprintf("Setting %v every %v...", filter, viper.GetDuration("tick")))
 	}
+	procs <- FilteredProcs(filter)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			select {
-			case s := <-signalChan:
-				switch s {
-				case unix.SIGUSR1:
-					// TODO: Reload cache here
-					if viper.GetBool("dry-run") || viper.GetBool("verbose") {
-						inform("", "Reloading cache...")
-						presetCache.LoadFromConfig()
-						inform("", "Cache reloaded.")
-					}
-				case os.Interrupt:
-					cancel()
-					os.Exit(1)
-				}
 			case <-ctx.Done():
-				if viper.GetBool("dry-run") || viper.GetBool("verbose") {
-					inform("", "Done.")
-				}
-				break
-				// os.Exit(0)
+				return
+			case <-ticker.C:
+				procs <- FilteredProcs(filter)
 			}
 		}
 	}()
-	procs <- FilteredProcs(filter)
 	for {
 		select {
+		case s := <-signalChan:
+			switch s {
+			case unix.SIGUSR1:
+				cancel()
+				// break
+			case unix.SIGUSR2:
+				// TODO: Reload cache here
+				if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+					inform("", "Reloading cache...")
+					presetCache.LoadFromConfig()
+					inform("", "Cache reloaded.")
+				}
+			case os.Interrupt:
+				cancel()
+				os.Exit(1)
+			}
 		case <-ctx.Done():
-			break
-			// close(output)
-			// return
-		case <-ticker.C:
-			procs <- FilteredProcs(filter)
+			if viper.GetBool("dry-run") || viper.GetBool("verbose") {
+				inform("", "Done.")
+			}
+			return nil
 		}
 	}
-	close(procs)
-	wg.Wait() // wait on the workers to finish
-	return
+	// wg.Wait() // wait on the workers to finish
+	// return
 }
 
 // vim: set ft=go fdm=indent ts=2 sw=2 tw=79 noet:

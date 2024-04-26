@@ -58,104 +58,27 @@ func NewPresetCache() PresetCache {
 	return pc
 }
 
-type Preset interface {
-	Cgroup | Profile | Rule
-	Keys() (string, string)
-	String() string
-}
-
-func ActivePreset[T Preset](s []T) (elem T) {
-	if len(s) > 0 {
-		elem = s[len(s)-1]
-	}
-	return
-}
-
-func IterCache[T Preset](m map[string][]T) chan T {
-	ch := make(chan T)
-	go func(ch chan T) {
-		for _, slice := range m {
-			ch <- ActivePreset(slice)
-		}
-		close(ch)
-	}(ch)
-	return ch
-}
-
-func List[T Preset](m map[string][]T) (result []string) {
-	for item := range IterCache(m) {
-		tag, origin := item.Keys()
-		result = append(result, fmt.Sprintf("%s\t%s\t%s", tag, origin, item.String()))
-	}
-	return
-}
-
-func ListFrom[T Preset](m map[string][]T, required string) (result []string) {
-	for item := range IterCache(m) {
-		tag, origin := item.Keys()
-		if origin != required {
-			continue
-		}
-		result = append(result, fmt.Sprintf("%s\t%s\t%s", tag, origin, item.String()))
-	}
-	return
-}
-
-func HasPreset[T Preset](m map[string][]T, key string) bool {
-	slice, found := m[key]
-	return found && len(slice) > 0
-}
-
-func GetPreset[T Preset](m map[string][]T, key string, kind string) (T, error) {
-	if slice, found := m[key]; found && len(slice) > 0 {
-		return ActivePreset(slice), nil
-	}
-	return *new(T), notFound(kind, key)
-}
-
-func Reverse[T any](s []T) []T {
-	first := 0
-	last := len(s) - 1
-	for first < last {
-		s[first], s[last] = s[last], s[first]
-		first++
-		last--
-	}
-	return s
-}
-
-func LoadConfig[T Preset](m map[string][]T, f func() chan T) {
-	for item := range f() {
-		tag, _ := item.Keys()
-		if _, found := m[tag]; found {
-			m[tag] = append(m[tag], item)
-		} else {
-			m[tag] = []T{item}
-		}
-	}
-}
-
-func (pc *PresetCache) LoadFromCache(cacheFile string) (err error) {
-	var data []byte
+func (pc *PresetCache) LoadFromCache(cacheFile string) error {
 	if exists(cacheFile) {
-		if data, err = os.ReadFile(cacheFile); err == nil {
-			return yaml.Unmarshal(data, &pc)
+		data, err := os.ReadFile(cacheFile)
+		if err == nil {
+			err = yaml.Unmarshal(data, &pc)
 		}
-		return
+		return failed(err)
 	}
 	return fmt.Errorf("%w: %v", ErrNotFound, cacheFile)
 }
 
-func (pc *PresetCache) GetContent() (data []byte, err error) {
+func (pc *PresetCache) GetContent() ([]byte, error) {
 	return yaml.Marshal(*pc)
 }
 
-func (pc *PresetCache) WriteCache(cacheFile string) (err error) {
-	var data []byte
-	if data, err = pc.GetContent(); err == nil {
+func (pc *PresetCache) WriteCache(cacheFile string) error {
+	data, err := pc.GetContent()
+	if err == nil {
 		err = os.WriteFile(cacheFile, data, 0600)
 	}
-	return
+	return err
 }
 
 func (pc *PresetCache) LoadFromConfig() (err error) {
@@ -212,7 +135,7 @@ func GetPresetCache() PresetCache {
 		case errors.Is(err, ErrNotFound):
 			inform("warning", err.Error())
 		default:
-			nonfatal(err)
+			nonfatal(failed(err))
 		}
 	}
 	pc.LoadFromConfig()
@@ -284,12 +207,10 @@ func (pc *PresetCache) RawRule(input *Request) (Rule, error) {
 	case "auto", "cgroup-only":
 		if rule, err := pc.Rule(input.Name); err == nil {
 			return rule, nil
+		} else if profile, err := pc.Profile("default"); err == nil {
+			return profile.ToRule(), nil
 		} else {
-			if profile, err := pc.Profile("default"); err == nil {
-				return profile.ToRule(), nil
-			} else {
-				return Rule{}, err
-			}
+			return Rule{}, err
 		}
 	default:
 		if profile, err := pc.Profile(input.Preset); err == nil {
@@ -307,9 +228,9 @@ func (pc *PresetCache) Expand(rule *Rule) error {
 			return err
 		}
 		UpdateRule(profile.BaseProfile, rule)
-		if !rule.HasCgroupKey() && profile.CgroupKey != "" {
-			rule.CgroupKey = profile.CgroupKey
-			cgroup, err := pc.Cgroup(profile.CgroupKey)
+		if key := profile.CgroupKey; !rule.HasCgroupKey() && key != "" {
+			rule.CgroupKey = key
+			cgroup, err := pc.Cgroup(key)
 			if err != nil {
 				return err
 			}
@@ -436,9 +357,9 @@ func (pc *PresetCache) RequestRule(input *Request) Rule {
 
 func (pc *PresetCache) RequestJob(input *Request) *ProcJob {
 	return &ProcJob{
-		ProcMap: &ProcMap{Proc: &Proc{}},
+		Proc:    &Proc{},
 		Request: input,
-		Result:  pc.RequestRule(input),
+		Rule:    pc.RequestRule(input),
 	}
 }
 
@@ -489,33 +410,29 @@ func (pc *PresetCache) GetFilterer(scope string) ProcFilterer {
 	})
 }
 
-func (pc *PresetCache) FilteredProcMaps(inputs <-chan []*Proc, outputs chan<- []*ProcMap, wg *sync.WaitGroup) {
+func (pc *PresetCache) FilteredProcs(inputs <-chan []*Proc, outputs chan<- []*Proc, wg *sync.WaitGroup) {
 	defer wg.Done()
-	var maps []*ProcMap
 	for procs := range inputs {
-		maps = nil
-		for _, p := range procs {
-			if pc.RuleFilter.Filter(p, nil) {
-				maps = append(maps, NewProcMap(p))
-			}
-		}
-		if len(maps) > 0 {
-			outputs <- maps
+		filtered := Filter(procs, func(p *Proc) bool {
+			return pc.RuleFilter.Filter(p, nil)
+		})
+		if len(filtered) > 0 {
+			outputs <- filtered
 		}
 	}
 	close(outputs)
 }
 
 func (pc *PresetCache) DiffReview(job *ProcGroupJob) (count int, err error) {
-	if len(job.Procs) == 0 {
+	if len(job.Jobs) == 0 {
 		return
 	}
 	leader := job.leader // process group leader only
 	// get rule and set leader rule for reference
-	leader.Result = pc.RequestRule(leader.Request)
+	leader.Rule = pc.RequestRule(leader.Request)
 	running := Rule{BaseProfile: leader.Runtime()}
 	// review diff
-	job.Diff, count = leader.Result.GetDiff(running)
+	job.Diff, count = leader.Rule.GetDiff(running)
 	// check cgroup: processes are easily movable when running inside
 	// session scope and some managed nicy slice
 	if job.Diff.HasCgroupKey() {
@@ -526,10 +443,10 @@ func (pc *PresetCache) DiffReview(job *ProcGroupJob) (count int, err error) {
 		}
 	} // end process group leader only
 	if viper.GetBool("debug") {
-		id := fmt.Sprintf("%s[%d]", leader.ProcMap.Comm, leader.ProcMap.Pgrp)
+		id := fmt.Sprintf("%s[%d]", leader.Proc.Comm, leader.Proc.Pgrp)
 		// info := groupjob.LeaderInfo()
 		for k, v := range map[string]map[string]any{
-			"preset":  ToInterface(leader.Result),
+			"preset":  ToInterface(leader.Rule),
 			"runtime": ToInterface(running),
 			"diff":    ToInterface(job.Diff),
 		} {
@@ -539,31 +456,31 @@ func (pc *PresetCache) DiffReview(job *ProcGroupJob) (count int, err error) {
 	return
 }
 
-func (pc *PresetCache) RawGroupJobs(inputs <-chan []*ProcMap, output chan<- *ProcGroupJob, wg *sync.WaitGroup) {
+func (pc *PresetCache) RawGroupJobs(inputs <-chan []*Proc, output chan<- *ProcGroupJob, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for maps := range inputs {
-		for groupmaps := range ProcMapByPgrp(maps).ByPgrp() {
+	for procs := range inputs {
+		for s := range ProcByPgrp(procs).ByPgrp() {
 			child := getWaitGroup()
 			child.Add(1)
 			go func() {
 				defer child.Done()
-				jobs := ProcMapToProcJob(groupmaps)
+				jobs := ProcToProcJob(s)
 				if len(jobs) > 0 {
 					// sort content
 					sort.SliceStable(jobs, func(i, j int) bool {
-						return jobs[i].ProcMap.Pid < jobs[j].ProcMap.Pid
+						return jobs[i].Proc.Pid < jobs[j].Proc.Pid
 					})
 					leader := jobs[0]
 					groupjob := &ProcGroupJob{ // new group job
-						Pgrp:   leader.ProcMap.Pgrp,
-						Pids:   []int{leader.ProcMap.Pid},
+						Pgrp:   leader.Proc.Pgrp,
+						Pids:   []int{leader.Proc.Pid},
 						Diff:   Rule{},
-						Procs:  []*ProcJob{leader},
+						Jobs:   []*ProcJob{leader},
 						leader: leader,
 					}
 					for _, job := range jobs[1:] { // add content
-						groupjob.Pids = append(groupjob.Pids, job.ProcMap.Pid)
-						groupjob.Procs = append(groupjob.Procs, job)
+						groupjob.Pids = append(groupjob.Pids, job.Proc.Pid)
+						groupjob.Jobs = append(groupjob.Jobs, job)
 					}
 					if count, _ := pc.DiffReview(groupjob); count > 0 {
 						output <- groupjob
@@ -580,7 +497,7 @@ func (pc *PresetCache) GenerateGroupJobs(inputs <-chan []*Proc, output chan<- *P
 	defer wgmain.Done()
 	// prepare channels
 	groupjobs := make(chan *ProcGroupJob, 8)
-	procmaps := make(chan []*ProcMap, 8)
+	procs := make(chan []*Proc, 8)
 	// spin up workers
 	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
 	wg.Add(1)            // prepare process group jobs adding commands
@@ -592,10 +509,10 @@ func (pc *PresetCache) GenerateGroupJobs(inputs <-chan []*Proc, output chan<- *P
 		}
 		close(output)
 	}()
-	wg.Add(1) // split procmaps and build process group jobs
-	go pc.RawGroupJobs(procmaps, groupjobs, &wg)
-	wg.Add(1) // filter procs and prepare procmaps
-	go pc.FilteredProcMaps(inputs, procmaps, &wg)
+	wg.Add(1) // split procs and build process group jobs
+	go pc.RawGroupJobs(procs, groupjobs, &wg)
+	wg.Add(1) // filter procs
+	go pc.FilteredProcs(inputs, procs, &wg)
 	wg.Wait() // wait on the workers to finish
 	return
 }

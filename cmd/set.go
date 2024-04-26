@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -55,7 +54,7 @@ Only superuser can run set command with --system, --global or --all option.`,
 		}()
 		scope := GetStringFromFlags("user", viper.GetStringSlice("scopes")...)
 		filter := GetScopeOnlyFilterer(scope)
-		err := doSetCmd("", filter, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		err := doSetCmd("", filter, &Streams{Stdin: nil, Stdout: cmd.OutOrStdout(), Stderr: cmd.ErrOrStderr()})
 		fatal(wrap(err))
 	},
 }
@@ -72,28 +71,18 @@ func init() {
 	setCmd.InheritedFlags().SortFlags = false
 }
 
-func doSetCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err error) {
+func doSetCmd(tag string, filter ProcFilterer, std *Streams) (err error) {
 	// prepare channels
 	jobs := make(chan *ProcGroupJob, 8)
 	procs := make(chan []*Proc, 8)
 	// spin up workers
 	wg := getWaitGroup() // use a sync.WaitGroup to indicate completion
-	// wg.Add(1)            // run jobs
-	// go func() {
-	//   defer wg.Done()
-	//   for job := range jobs {
-	//     err = job.Run("", stdout, stderr)
-	//     if err != nil {
-	//       return
-	//     }
-	//   }
-	// }()
 	for i := 0; i < (goMaxProcs + 1); i++ {
 		wg.Add(1) // run jobs
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				err = job.Run("", stdout, stderr)
+				err = job.Run("", std)
 				if err != nil {
 					return
 				}
@@ -102,16 +91,6 @@ func doSetCmd(tag string, filter ProcFilterer, stdout, stderr io.Writer) (err er
 	}
 	wg.Add(1) // get jobs
 	go presetCache.GenerateGroupJobs(procs, jobs, &wg)
-
-	// groupjobs := make(chan *ProcGroupJob, 8)
-	// procmaps := make(chan []*ProcMap, 8)
-	// wg.Add(1) // prepare process group jobs adding commands
-	// go prepareGroupJobs(groupjobs, jobs, &wg)
-	// wg.Add(1) // split procmaps and build process group jobs
-	// go buildGroupJobs(procmaps, groupjobs, &wg)
-	// wg.Add(1) // filter procs and prepare procmaps
-	// go filterProcMaps(procs, procmaps, &wg)
-
 	// send input
 	// filter := GetScopeOnlyFilterer(scope)
 	if viper.GetBool("dry-run") || viper.GetBool("verbose") {

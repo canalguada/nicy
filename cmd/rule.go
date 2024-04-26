@@ -16,101 +16,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package cmd
 
-import (
-	"encoding/json"
-	"fmt"
-	"reflect"
-	"strconv"
-	"strings"
-
-	"gopkg.in/yaml.v2"
-)
-
-type BaseCgroup struct {
-	CPUQuota   string `yaml:"CPUQuota,omitempty" json:"CPUQuota,omitempty"`
-	IOWeight   string `yaml:"IOWeight,omitempty" json:"IOWeight,omitempty"`
-	MemoryHigh string `yaml:"MemoryHigh,omitempty" json:"MemoryHigh,omitempty"`
-	MemoryMax  string `yaml:"MemoryMax,omitempty" json:"MemoryMax,omitempty"`
-}
-
-func (c *BaseCgroup) HasScopeProperties() bool {
-	return c.CPUQuota != "" || c.IOWeight != "" ||
-		c.MemoryHigh != "" || c.MemoryMax != ""
-}
-
-func (c *BaseCgroup) ScopeProperties() (result []string) {
-	if c.CPUQuota != "" {
-		if v, err := strconv.Atoi(strings.TrimSuffix(c.CPUQuota, `%`)); err == nil {
-			value := fmt.Sprintf("%d%%", numCPU*v)
-			result = append(result, fmt.Sprintf("CPUQuota=%s", value))
-		}
-	}
-	if c.IOWeight != "" {
-		result = append(result, fmt.Sprintf("IOWeight=%s", c.IOWeight))
-	}
-	if c.MemoryHigh != "" {
-		result = append(result, fmt.Sprintf("MemoryHigh=%s", c.MemoryHigh))
-	}
-	if c.MemoryMax != "" {
-		result = append(result, fmt.Sprintf("MemoryMax=%s", c.MemoryMax))
-	}
-	return
-}
-
-type Cgroup struct {
-	BaseCgroup `yaml:"basecgroup,omitempty,flow"`
-	CgroupKey  string `yaml:"cgroup,omitempty" json:"cgroup,omitempty"`
-	Origin     string `yaml:"origin,omitempty" json:"origin,omitempty"`
-}
-
-func (c Cgroup) Keys() (string, string) {
-	return c.CgroupKey, c.Origin
-}
-
-func (c Cgroup) String() string {
-	c.CgroupKey, c.Origin = "", ""
-	return ToJson(c)
-}
-
-type BaseProfile struct {
-	Nice        int    `yaml:"nice,omitempty" json:"nice,omitempty"`
-	Sched       string `yaml:"sched,omitempty" json:"sched,omitempty"`
-	RTPrio      int    `yaml:"rtprio,omitempty" json:"rtprio,omitempty"`
-	IOClass     string `yaml:"ioclass,omitempty" json:"ioclass,omitempty"`
-	IONice      int    `yaml:"ionice,omitempty" json:"ionice,omitempty"`
-	OomScoreAdj int    `yaml:"oom_score_adj,omitempty" json:"oom_score_adj,omitempty"`
-}
-
-type Profile struct {
-	// Cgroup: assign to cgroup slice with `CgroupKey`
-	// and eventually adjust scope properties in BaseCgroup
-	BaseCgroup  `yaml:"basecgroup,omitempty,flow"`
-	BaseProfile `yaml:"baseprofile,omitempty,flow"`
-	CgroupKey   string `yaml:"cgroup,omitempty" json:"cgroup,omitempty"`
-	ProfileKey  string `yaml:"profile,omitempty" json:"profile,omitempty"`
-	Origin      string `yaml:"origin,omitempty" json:"origin,omitempty"`
-}
-
-func (p Profile) Keys() (string, string) {
-	return p.ProfileKey, p.Origin
-}
-
-func (p Profile) String() string {
-	p.ProfileKey, p.Origin = "", ""
-	return ToJson(p)
-}
-
-func (p *Profile) ToRule() Rule {
-	return Rule{
-		BaseProfile: p.BaseProfile,
-		BaseCgroup:  p.BaseCgroup,
-		BaseRule: BaseRule{
-			ProfileKey: p.ProfileKey,
-			CgroupKey:  p.CgroupKey,
-		},
-	}
-}
-
 type BaseRule struct {
 	// Profile: assign to profile with `ProfileKey`
 	// and eventually adjust process properties in Rule
@@ -143,90 +48,6 @@ func (r Rule) Path() string {
 func (r Rule) String() string {
 	r.RuleKey, r.Origin = "", ""
 	return ToJson(r)
-}
-
-type Struct interface {
-	BaseCgroup | Cgroup | BaseProfile | Profile | BaseRule | Rule
-}
-
-func ToInterface[T Struct](st T) map[string]any {
-	m := make(map[string]any)
-	data, err := yaml.Marshal(st)
-	nonfatal(wrap(err))
-	if err := yaml.Unmarshal(data, &m); err != nil {
-		nonfatal(wrap(err))
-	}
-	return m
-}
-
-func ToJson[T Struct](st T) string {
-	data, err := json.Marshal(st)
-	nonfatal(wrap(err))
-	return string(data)
-}
-
-// ResetMatching iterate through st1 fields and, if set, resets
-// matching fields in st2.
-func ResetMatching[T1, T2 Struct](st1 *T1, st2 *T2) {
-	s1 := reflect.ValueOf(st1).Elem()
-	s2 := reflect.ValueOf(st2).Elem()
-	typeOfT1 := s1.Type()
-	for i := 0; i < s1.NumField(); i++ {
-		f1 := s1.Field(i)
-		if f1.IsValid() && !f1.IsZero() {
-			if f2 := s2.FieldByName(typeOfT1.Field(i).Name); f2.IsValid() {
-				f2.Set(reflect.Zero(f2.Type()))
-			}
-		}
-	}
-}
-
-// UpdateRule iterates through st1 fields and, if set, updates
-// matching fields in st2, if not set yet.
-func UpdateRule[T1 BaseCgroup | BaseProfile](st T1, rule *Rule) {
-	s := reflect.ValueOf(&st).Elem()
-	r := reflect.ValueOf(rule).Elem()
-	typeOfT1 := s.Type()
-	for i := 0; i < s.NumField(); i++ {
-		f1 := s.Field(i)
-		if f1.IsValid() && !f1.IsZero() { // f1 is set
-			// Find matching f2 field. Is it set ?
-			if f2 := r.FieldByName(typeOfT1.Field(i).Name); f2.IsValid() && f2.IsZero() {
-				f2.Set(f1)
-			}
-		}
-	}
-}
-
-func Properties[T BaseCgroup | BaseProfile](st T) (result []string) {
-	base := reflect.ValueOf(&st).Elem()
-	typeOfBase := base.Type()
-	for i := 0; i < base.NumField(); i++ {
-		f := base.Field(i)
-		if f.IsValid() && !f.IsZero() {
-			name := typeOfBase.Field(i).Name
-			result = append(result, fmt.Sprintf("%s=%s", name, f.Interface()))
-		}
-	}
-	return
-}
-
-func Diff[T BaseCgroup | BaseProfile](preset T, runtime T) (T, int) {
-	result := new(T)
-	diff := reflect.ValueOf(result).Elem()
-	count := 0
-	rt := reflect.ValueOf(&runtime).Elem()
-	base := reflect.ValueOf(&preset).Elem()
-	for i := 0; i < base.NumField(); i++ {
-		f := base.Field(i)
-		if f.IsValid() && !f.IsZero() {
-			if rt.Field(i).Interface() != f.Interface() {
-				diff.Field(i).Set(f)
-				count++
-			}
-		}
-	}
-	return *result, count
 }
 
 func (r *Rule) HasProfileKey() bool {
@@ -296,9 +117,7 @@ func (r *Rule) NeedScope() bool {
 }
 
 func (r *Rule) GetCredentials() (result []string) {
-	if r.Nice < 0 {
-		result = append(result, "nice")
-	}
+	result = append(result, "nice")
 	if r.Sched == "fifo" || r.Sched == "rr" {
 		result = append(result, "sched")
 	}
@@ -309,16 +128,8 @@ func (r *Rule) GetCredentials() (result []string) {
 }
 
 func (r *Rule) SetCredentials() {
-	if r.Nice < 0 {
-		r.Credentials = append(r.Credentials, "nice")
-	}
-	if r.Sched == "fifo" || r.Sched == "rr" {
-		r.Credentials = append(r.Credentials, "sched")
-	}
-	if r.IOClass == "realtime" {
-		r.Credentials = append(r.Credentials, "ioclass")
-	}
-	return
+	r.Credentials = nil
+	r.Credentials = append(r.Credentials, r.GetCredentials()...)
 }
 
 func (r *Rule) SetSliceProperties(properties []string) {

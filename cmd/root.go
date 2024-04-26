@@ -19,7 +19,6 @@ package cmd
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,7 +30,7 @@ import (
 
 const (
 	prog     = "nicy"
-	version  = "0.2.1"
+	version  = "0.2.2"
 	confName = "v" + version
 	confType = "yaml"
 )
@@ -147,7 +146,7 @@ func expandPath(path string) string {
 func mergeConfigFile(path string) (err error) {
 	if exists(path) {
 		var configBytes []byte
-		if configBytes, err = ioutil.ReadFile(path); err == nil {
+		if configBytes, err = os.ReadFile(path); err == nil {
 			// Find and read the config file
 			if err = viper.MergeConfig(bytes.NewBuffer(configBytes)); err == nil {
 				viper.SetConfigFile(path)
@@ -202,9 +201,9 @@ func initConfig() {
 	if uid == 0 {
 		configPaths = configPaths[1:]
 	}
-	for i, path := range configPaths {
-		configPaths[i] = filepath.Join(path, prog)
-	}
+	configPaths = Map(configPaths, func(path string) string {
+		return filepath.Join(path, prog)
+	})
 	// Default install path for scripts
 	if uid != 0 {
 		viper.SetDefault("scripts.location", filepath.Join(home, "bin", prog))
@@ -224,8 +223,8 @@ func initConfig() {
 	viper.SetConfigName(confName)
 	viper.SetConfigType(confType)
 	// First merge existing default config files
-	for i := len(configPaths) - 1; i >= 0; i-- {
-		if err := mergeConfigFile(filepath.Join(configPaths[i], confName+"."+confType)); err != nil {
+	for _, path := range Reverse(configPaths) {
+		if err := mergeConfigFile(filepath.Join(path, confName+"."+confType)); err != nil {
 			debug(err)
 		}
 	}

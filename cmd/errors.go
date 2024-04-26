@@ -86,6 +86,13 @@ func nonfatal(e error) bool {
 	return true
 }
 
+func failed(e error) error {
+	if e == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrFailure, e)
+}
+
 func wrap(e error) error {
 	if e == nil {
 		return nil
@@ -115,16 +122,16 @@ func wrap(e error) error {
 			case os.IsPermission(e):
 				return fmt.Errorf("%w: %q", ErrPermission, e.Path)
 			default:
-				return fmt.Errorf("%w: %v", ErrFailure, e)
+				return failed(e)
 			}
 		case *json.InvalidUnmarshalError:
 			return fmt.Errorf("%w: %v", ErrInvalid, e)
 		case *exec.ExitError:
-			return fmt.Errorf("%w: %v", ErrFailure, e)
+			return failed(e)
 		case *exec.Error:
 			return wrap(e.Unwrap())
 		default:
-			return fmt.Errorf("%w: %v", ErrFailure, e)
+			return failed(e)
 		}
 	}
 }

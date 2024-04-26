@@ -157,7 +157,7 @@ func doInstallCmd(location string) (err error) {
 		calling := GetCalling()
 		for r := range IterCache(presetCache.Rules) {
 			if path, ok := scriptOk(r.Path()); ok {
-				input := NewRawRequest(r.RuleKey, path, viper.GetString("shell"))
+				input := NewRequest(r.RuleKey, path, viper.GetString("shell"))
 				input.Proc = calling
 				inputs <- input
 			}
